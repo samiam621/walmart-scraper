@@ -1,7 +1,9 @@
 // Not a constant any more: the same extension has to talk to a local dev
 // server or a deployed one. Loaded from chrome.storage.sync at popup open,
-// falling back to localhost so a fresh install still works out of the box.
-const DEFAULT_BACKEND = 'http://127.0.0.1:8000';
+// falling back to this when nothing is stored — the deployed backend, so a
+// fresh install works without setup. For local work, put http://127.0.0.1:8000
+// in the Backend URL field; that is stored and wins over this default.
+const DEFAULT_BACKEND = 'https://walmart-scraper-mdp2.onrender.com';
 let BACKEND = DEFAULT_BACKEND;
 
 // Trailing slashes double up when concatenated with a path, producing a 404
