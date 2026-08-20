@@ -7,11 +7,15 @@ the model gains a field lands under the wrong headers.
 """
 
 import csv
+import os
 from pathlib import Path
 
 from models import Product
 
-DATA_DIR = Path(__file__).parent / "data"
+# Overridable because a hosted container's filesystem is wiped on every deploy
+# and restart. Point DATA_DIR at a mounted persistent disk there, or the CSV —
+# and so the whole export backlog — silently resets.
+DATA_DIR = Path(os.getenv("DATA_DIR", Path(__file__).parent / "data")).expanduser()
 FILE_PATH = DATA_DIR / "products.csv"
 
 # Fixed column order, taken from the model definition once at import time.

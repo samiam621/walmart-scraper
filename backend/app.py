@@ -1,13 +1,26 @@
+import asyncio
 import os
+from pathlib import Path
 
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-import listing
-import storage
+from dotenv import load_dotenv
+
+# Before anything reads os.getenv. The .env lives at the repo root, not next
+# to this file, so uvicorn picks it up no matter which directory you start it
+# from. Real environment variables already set win over the file.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+import export  # noqa: E402 - must follow load_dotenv
+import listing  # noqa: E402
+import sheets  # noqa: E402
+import storage  # noqa: E402
 from models import Product, ScrapeRequest
+from pydantic import BaseModel
+
 from scraper import BlockedError, scrape_html, scrape_url
 
 app = FastAPI(title="Product Scraper")
@@ -22,6 +35,15 @@ CORS_ORIGINS = (
     {"allow_origins": [f"chrome-extension://{i}" for i in EXTENSION_IDS]}
     if EXTENSION_IDS
     else {"allow_origin_regex": r"chrome-extension://[a-p]{32}"}
+)
+
+# On a host with no persistent disk, products.csv does not survive a deploy or
+# an idle spin-down, so a scrape that is only written to the CSV is a scrape
+# you will lose. Pushing each one to the sheet as it happens makes the sheet
+# the durable record. Harmless when Sheets is unconfigured — the push reports
+# that it was skipped and the scrape is unaffected either way.
+AUTO_EXPORT_SHEETS = os.getenv("AUTO_EXPORT_SHEETS", "true").strip().lower() not in (
+    "0", "false", "no", "off", ""
 )
 
 app.add_middleware(
@@ -128,7 +150,7 @@ async def scrape_page(request: ScrapeRequest, save: bool = True):
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"Fetch failed: {exc}") from exc
-        return _respond([product], "product", save)
+        return await _respond([product], "product", save)
 
     soup = BeautifulSoup(html, "lxml")
     kind = listing.page_type(url=url, soup=soup)
@@ -141,7 +163,7 @@ async def scrape_page(request: ScrapeRequest, save: bool = True):
         products = listing.scrape_listing_soup(soup, url)
 
     if products:
-        return _respond(products, "listing", save)
+        return await _respond(products, "listing", save)
 
     single = scrape_html(html, url=url)
     if single.price is None and not (single.itemId or single.upc or single.sku or single.gtin):
@@ -152,14 +174,84 @@ async def scrape_page(request: ScrapeRequest, save: bool = True):
                 "identifier for a single product."
             ),
         )
-    return _respond([single], "product", save)
+    return await _respond([single], "product", save)
 
 
-def _respond(products: list[Product], kind: str, save: bool) -> dict:
+async def _respond(products: list[Product], kind: str, save: bool) -> dict:
     if save:
         for product in products:
             storage.save_product(product)
-    return {"pageType": kind, "count": len(products), "products": products}
+
+    payload = {"pageType": kind, "count": len(products), "products": products}
+    if save and AUTO_EXPORT_SHEETS:
+        payload["export"] = await _push_to_sheets(products)
+    return payload
+
+
+async def _push_to_sheets(products: list[Product]) -> dict:
+    """Best-effort export. Never raises — a scrape that parsed correctly is
+    still a success even if Google is unreachable, and the rows stay in the
+    CSV for the next push to pick up."""
+    try:
+        # gspread is blocking, and this runs inside an async endpoint; without
+        # the thread it would stall every other request for the round trip.
+        result = await asyncio.to_thread(sheets.push, products, "append")
+    except sheets.SheetsError as exc:
+        return {"ok": False, "reason": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        return {"ok": False, "reason": f"Sheets push failed: {exc}"}
+
+    return {
+        "ok": True,
+        "rowsWritten": result["rowsWritten"],
+        "skipped": result["skipped"],
+        "url": result["url"],
+    }
+
+
+class SheetsExportRequest(BaseModel):
+    # "append" adds what the sheet is missing; "replace" rewrites the tab.
+    mode: str = "append"
+    # Optional: export only these item ids. The extension sends the ids it
+    # just scraped so one click pushes that page, not the whole backlog.
+    itemIds: list[str] | None = None
+
+
+@app.get("/api/export/preview")
+async def export_preview(limit: int = 50):
+    """The rows exactly as they would land in the sheet. Check the mapping
+    here before pushing anything to Google."""
+    rows = export.rows_as_dicts(storage.load_products())
+    return {"columns": export.COLUMNS, "count": len(rows), "rows": rows[:limit]}
+
+
+@app.post("/api/export/sheets")
+async def export_to_sheets(request: SheetsExportRequest):
+    """Push saved products into the configured Google Sheet."""
+    if request.mode not in ("append", "replace"):
+        raise HTTPException(
+            status_code=400, detail=f"Unknown mode {request.mode!r}; use 'append' or 'replace'."
+        )
+
+    products = storage.load_products()
+
+    if request.itemIds:
+        wanted = {str(i).strip() for i in request.itemIds if str(i).strip()}
+        products = [p for p in products if str(p.get("itemId", "")).strip() in wanted]
+        if not products:
+            raise HTTPException(
+                status_code=404,
+                detail="None of those item ids are saved. Scrape the page first.",
+            )
+
+    if not products:
+        raise HTTPException(status_code=404, detail="Nothing saved yet — scrape a page first.")
+
+    try:
+        return sheets.push(products, mode=request.mode)
+    except sheets.SheetsError as exc:
+        # 503, not 500: the code is fine, the credentials or sharing are not.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/api/products")
@@ -169,4 +261,11 @@ async def list_products():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+
+    # 127.0.0.1 locally so a dev server is not exposed to the network, but a
+    # PaaS routes to the container from outside and health-checks it, so a
+    # loopback bind there just fails to answer. PORT is assigned per deploy,
+    # never hardcoded.
+    port = int(os.getenv("PORT", "8000"))
+    host = os.getenv("HOST", "0.0.0.0" if os.getenv("PORT") else "127.0.0.1")
+    uvicorn.run(app, host=host, port=port)

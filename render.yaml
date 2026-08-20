@@ -1,0 +1,46 @@
+# Render blueprint. Creating the service from this file (New > Blueprint)
+# keeps the start command and env vars in git rather than in someone's memory.
+# An already-hand-made service ignores this file — set its variables on the
+# service's own Environment page instead.
+services:
+  - type: web
+    name: walmart-scraper
+    runtime: python
+    plan: free             # free instances cannot mount a disk — see below
+    rootDir: backend       # so `import scraper` etc. resolve without a package
+    buildCommand: pip install -r ../requirements.txt
+    # $PORT is assigned per deploy. Binding 0.0.0.0 is what makes the container
+    # reachable from Render's router; 127.0.0.1 would pass locally and then
+    # fail every health check here.
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+
+    # No disk: a free instance cannot mount one, so products.csv lives on a
+    # filesystem that is wiped on every deploy and every spin-down after idle.
+    # AUTO_EXPORT_SHEETS is what makes that survivable — each scrape is pushed
+    # to the sheet as it happens, so the sheet, not the CSV, is the record that
+    # lasts. Moving to a paid plan? Add a disk and set DATA_DIR to its mount
+    # path, and the CSV becomes durable too.
+    envVars:
+      - key: AUTO_EXPORT_SHEETS
+        value: "true"
+      - key: PYTHON_VERSION
+        value: "3.12"
+
+      # sync: false means Render prompts for it and never stores it in git.
+      # Set these in the dashboard, not here.
+      - key: GOOGLE_SHEET_ID
+        sync: false
+      - key: GOOGLE_SHEET_TAB
+        value: Sheet1
+      # The key's JSON contents, or that JSON base64 encoded. Prefer base64:
+      # the private_key is a single line of \n escapes that dashboard fields
+      # like to reformat. Alternatively add the key as a Secret File and set
+      # GOOGLE_SERVICE_ACCOUNT_FILE=/etc/secrets/<filename> instead.
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      # Lock CORS to your extension's real id once you know it. Left unset,
+      # the backend accepts any unpacked extension — fine on localhost, too
+      # loose for something on the public internet.
+      - key: EXTENSION_IDS
+        sync: false

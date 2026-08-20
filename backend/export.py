@@ -1,0 +1,225 @@
+"""Maps scraped products onto the flat sheet layout.
+
+The sheet is not a dump of the CSV. Four columns are derived rather than
+copied, because the value a listing tool needs is not the value the page
+carries:
+
+  GTIN         a UPC-A *is* a GTIN, just left-unpadded. Feeds expect 14
+               digits, so "469139796107" has to become "00469139796107".
+  Listing URL  the scraped URL is an SEO slug with tracking query params that
+               rot; /ip/{itemId} is the stable address for the same item.
+  Image URL    Walmart serves whatever size the page asked for. Pinning the
+               odn* params gets the 2000px original instead of a thumbnail.
+  Condition    see resolve_condition() — Walmart's JSON-LD lies about this.
+
+Everything here works on plain dicts as well as Product objects, because the
+CSV round-trip hands back dicts of strings and both paths feed the same sheet.
+"""
+
+import re
+
+# Column order follows example.xlsx, with Other Identifier inserted after the
+# GTIN it stands in for.
+COLUMNS = [
+    "Product Title",
+    "Item Condition",
+    "Image URL",
+    "Item ID",
+    "GTIN",
+    "Other Identifier",
+    "Listing URL",
+]
+
+# Walmart's display wording, not schema.org's. These strings end up in front
+# of a human reading the sheet, and "used" is not what the site calls it.
+CONDITION_LABELS = {
+    "new": "New",
+    "used": "Pre-Owned",
+    "refurbished": "Restored",
+    "open_box": "Open Box",
+}
+
+# Grade suffixes Walmart appends to pre-owned listings ("Pre-Owned: Good").
+# Only trusted off the title, where the seller wrote it.
+CONDITION_GRADE = re.compile(
+    r"pre[\s-]?owned\s*:?\s*(good|fair|excellent|like\s*new)", re.I
+)
+
+_ITEM_ID_IN_PATH = re.compile(r"/ip/(?:.*/)?(\d{6,})")
+
+# The size Walmart's own "view larger" uses. odnBg matters: without it
+# transparent PNGs composite onto black in some feed importers.
+FULL_SIZE_PARAMS = "odnHeight=2000&odnWidth=2000&odnBg=FFFFFF"
+
+
+def _get(record, field: str) -> str | None:
+    """Read a field from a Product or a CSV dict, normalizing '' to None."""
+    value = getattr(record, field, None) if not isinstance(record, dict) else record.get(field)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _digits(value: str | None) -> str | None:
+    if not value:
+        return None
+    digits = re.sub(r"\D", "", value)
+    return digits or None
+
+
+def to_gtin14(*candidates: str | None) -> str | None:
+    """Normalize the first usable barcode to a 14-digit GTIN.
+
+    UPC-A (12), EAN-13 and GTIN-14 are the same number space at different
+    widths, so zero-padding is the whole conversion. Anything longer than 14
+    digits is not a barcode — usually a Walmart item id that landed in the
+    wrong column — and is dropped rather than truncated into a wrong one.
+    """
+    for candidate in candidates:
+        digits = _digits(candidate)
+        if digits and 8 <= len(digits) <= 14:
+            return digits.zfill(14)
+    return None
+
+
+def resolve_condition(record) -> str | None:
+    """Work out what condition the item is actually in.
+
+    Walmart's JSON-LD reports NewCondition on pre-owned marketplace listings —
+    the iPad in example.xlsx is titled "Pre-Owned" and served under
+    conditionGroupCode=3, yet its offer says new. So a used/refurbished signal
+    in the seller-written title outranks a schema that merely says "new"; a
+    schema saying anything *other* than new is specific enough to trust.
+    """
+    from scraper import detect_condition  # local: scraper imports nothing here
+
+    condition = _get(record, "condition")
+    title = _get(record, "title")
+
+    from_title = detect_condition(title)
+    if from_title and from_title != "new" and (condition is None or condition == "new"):
+        condition = from_title
+
+    if condition is None:
+        return None
+
+    label = CONDITION_LABELS.get(condition, condition.replace("_", " ").title())
+
+    # Preserve the grade when the title carries one, so "Pre-Owned: Good"
+    # survives the round trip through the normalized bucket.
+    if condition == "used" and title:
+        match = CONDITION_GRADE.search(title)
+        if match:
+            grade = re.sub(r"\s+", " ", match.group(1)).strip().title()
+            return f"Pre-Owned: {grade}"
+    return label
+
+
+def resolve_item_id(record) -> str | None:
+    """The Walmart item id, read off the URL when the field itself is empty.
+
+    Grid tiles routinely parse without an explicit id while still linking to
+    /ip/<id>, and a row with no id cannot be deduplicated or linked.
+    """
+    item_id = _digits(_get(record, "itemId"))
+    if item_id:
+        return item_id
+
+    url = _get(record, "url")
+    if url:
+        match = _ITEM_ID_IN_PATH.search(url)
+        if match:
+            return match.group(1)
+    return None
+
+
+def canonical_listing_url(record) -> str | None:
+    """The stable /ip/{itemId} address, falling back to the scraped URL."""
+    url = _get(record, "url")
+    item_id = resolve_item_id(record)
+
+    if item_id:
+        return f"https://www.walmart.com/ip/{item_id}"
+    return url
+
+
+def full_size_image(record) -> str | None:
+    """Ask Walmart's image CDN for the original rather than a page thumbnail."""
+    url = _get(record, "imageLink")
+    if not url or "walmartimages.com" not in url:
+        return url
+
+    base = url.split("?", 1)[0]
+    return f"{base}?{FULL_SIZE_PARAMS}"
+
+
+def other_identifier(record, gtin: str | None) -> str | None:
+    """A backup identifier, typed so the reader knows what they are holding.
+
+    Two cases, both worth filling. If no GTIN could be built, this is the only
+    identifier the row has. If one could, this still carries the manufacturer
+    number, which is what matches a listing to a catalogue entry when the
+    barcode does not.
+    """
+    upc = _digits(_get(record, "upc"))
+    # Anything outside barcode width is a mis-parse (usually an item id that
+    # landed in the upc field), and it was already rejected from the GTIN
+    # column. Do not launder it into this one.
+    if upc and not 8 <= len(upc) <= 14:
+        upc = None
+    # Skip the UPC when it is the very number already padded into the GTIN
+    # column — repeating it teaches the reader nothing.
+    if upc and (gtin is None or gtin.lstrip("0") != upc.lstrip("0")):
+        return f"UPC:{upc}"
+
+    for field, prefix in (("mpn", "MPN"), ("sku", "SKU")):
+        value = _get(record, field)
+        if value:
+            return f"{prefix}:{value}"
+    return None
+
+
+def product_to_row(record) -> list:
+    """One product -> one sheet row, in COLUMNS order."""
+    gtin = to_gtin14(_get(record, "gtin"), _get(record, "upc"))
+    item_id = resolve_item_id(record)
+
+    return [
+        _get(record, "title") or "",
+        resolve_condition(record) or "",
+        full_size_image(record) or "",
+        # Sent as an int so the sheet stores it as a number, matching the
+        # example. GTIN stays a string: its leading zeros are significant.
+        int(item_id) if item_id else "",
+        gtin or "",
+        other_identifier(record, gtin) or "",
+        canonical_listing_url(record) or "",
+    ]
+
+
+def build_rows(records, *, header: bool = True, dedupe: bool = True) -> list[list]:
+    """Products -> sheet rows, newest scrape order preserved.
+
+    Deduplicates on item id because re-scraping a page you already saved is
+    the normal way to use the extension, and the CSV keeps every append.
+    """
+    rows: list[list] = [list(COLUMNS)] if header else []
+    seen: set[str] = set()
+
+    for record in records:
+        row = product_to_row(record)
+        if dedupe:
+            # Fall back to the title for items with no id at all, so two
+            # different unidentified products still get two rows.
+            key = str(row[3]) or row[4] or row[0]
+            if key and key in seen:
+                continue
+            seen.add(key)
+        rows.append(row)
+    return rows
+
+
+def rows_as_dicts(records) -> list[dict]:
+    """Same rows, keyed by column name — for previewing over the API."""
+    return [dict(zip(COLUMNS, row)) for row in build_rows(records, header=False)]

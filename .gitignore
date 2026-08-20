@@ -4,3 +4,7 @@ __pycache__/
 backend/data/
 .DS_Store
 .cursor/
+# Google service account keys — live credentials, never commit
+*.json
+!chromefrontend/manifest.json
+.env
