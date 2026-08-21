@@ -121,8 +121,11 @@ async function sendToSheets() {
 
   try {
     const result = await post({ mode: 'append', itemIds: lastScrapedIds }, '/api/export/sheets');
+    // "Updated" is its own count, not a kind of skip: it means a row that was
+    // already there had blanks a fresh scrape could fill.
+    const updated = result.rowsUpdated ? `, ${result.rowsUpdated} filled in` : '';
     const skipped = result.skipped ? `, ${result.skipped} already there` : '';
-    status.textContent = `Added ${result.rowsWritten} row(s) to ${result.tab}${skipped}`;
+    status.textContent = `Added ${result.rowsWritten} row(s) to ${result.tab}${updated}${skipped}`;
   } catch (error) {
     console.error(error);
     status.textContent = error.message;

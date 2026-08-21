@@ -157,20 +157,50 @@ def _open_worksheet(client, sheet_id: str, tab: str, key: dict):
         return spreadsheet.add_worksheet(title=tab, rows=1000, cols=len(export.COLUMNS))
 
 
-def _existing_keys(worksheet) -> set[str]:
-    """Item ids already in the sheet, so append does not duplicate them."""
+def _existing_rows(worksheet) -> dict[str, int]:
+    """Item id -> 1-based sheet row, so append can update in place.
+
+    Matching on id alone is not enough to decide what to do with a repeat: a
+    row written from a search-grid tile carries a title, an image and an id
+    and nothing else, because a tile has no GTIN to give. Re-scraping that
+    item's own product page is the normal way to fill those gaps, so the row
+    number is kept, not just the id — see _merge_row.
+    """
     item_id_column = export.COLUMNS.index("Item ID") + 1
     try:
         values = worksheet.col_values(item_id_column)
     except Exception:  # noqa: BLE001 - an unreadable sheet just means no dedupe
-        return set()
-    return {value.strip() for value in values[1:] if value.strip()}
+        return {}
+    # enumerate from 2: row 1 is the header, and values[0] is that header.
+    return {
+        value.strip(): index
+        for index, value in enumerate(values[1:], start=2)
+        if value.strip()
+    }
+
+
+def _merge_row(old: list, new: list) -> list | None:
+    """Fill blanks in an existing row from a fresh scrape. None if unchanged.
+
+    Only empty cells are written. A re-scrape is allowed to complete a row,
+    never to overwrite it: the sheet is the durable record and may have been
+    edited by hand, and a later scrape of the same item can legitimately carry
+    *less* than the first (a grid tile after a product page).
+    """
+    merged = list(old) + [""] * (len(export.COLUMNS) - len(old))
+    changed = False
+    for index, value in enumerate(new):
+        if str(value).strip() and not str(merged[index]).strip():
+            merged[index] = value
+            changed = True
+    return merged if changed else None
 
 
 def push(records, mode: str = "append") -> dict:
     """Write products to the configured sheet.
 
-    append   adds rows for products the sheet does not already have
+    append   adds rows for products the sheet does not have, and fills in
+             blank cells on the rows it does (see _merge_row)
     replace  clears the tab and rewrites it from the given products
 
     Values go up with value_input_option="RAW" so Sheets stores them verbatim.
@@ -192,18 +222,37 @@ def push(records, mode: str = "append") -> dict:
             values=[list(export.COLUMNS)] + rows, range_name="A1", value_input_option="RAW"
         )
         written = len(rows)
+        updated = 0
     else:
-        existing = _existing_keys(worksheet)
-        rows = [row for row in rows if str(row[3]) not in existing]
+        existing = _existing_rows(worksheet)
+
+        # Read the rows we might update in one call rather than one per row.
+        current = worksheet.get_all_values() if existing else []
+
+        new_rows, updates = [], []
+        for row in rows:
+            line = existing.get(str(row[3]))
+            if line is None:
+                new_rows.append(row)
+                continue
+            old = current[line - 1] if line - 1 < len(current) else []
+            merged = _merge_row(old, row)
+            if merged:
+                last_column = chr(ord("A") + len(export.COLUMNS) - 1)
+                updates.append({"range": f"A{line}:{last_column}{line}", "values": [merged]})
 
         # An empty sheet still needs its header before the first append.
         if not worksheet.acell("A1").value:
             worksheet.update(
                 values=[list(export.COLUMNS)], range_name="A1", value_input_option="RAW"
             )
-        if rows:
-            worksheet.append_rows(rows, value_input_option="RAW")
-        written = len(rows)
+        if updates:
+            # One request for every repaired row, not one per row.
+            worksheet.batch_update(updates, value_input_option="RAW")
+        if new_rows:
+            worksheet.append_rows(new_rows, value_input_option="RAW")
+        written = len(new_rows)
+        updated = len(updates)
 
     _format_header(worksheet)
 
@@ -211,7 +260,9 @@ def push(records, mode: str = "append") -> dict:
         "status": "ok",
         "mode": mode,
         "rowsWritten": written,
-        "skipped": len(all_rows) - written,
+        "rowsUpdated": updated,
+        # Genuinely nothing to do: already present *and* nothing to fill in.
+        "skipped": len(all_rows) - written - updated,
         "tab": tab,
         "url": f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit",
     }

@@ -204,6 +204,7 @@ async def _push_to_sheets(products: list[Product]) -> dict:
     return {
         "ok": True,
         "rowsWritten": result["rowsWritten"],
+        "rowsUpdated": result["rowsUpdated"],
         "skipped": result["skipped"],
         "url": result["url"],
     }
