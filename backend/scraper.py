@@ -70,7 +70,7 @@ CONDITION_LABELS = {
 }
 
 
-CONDITION_GRADES = r"like[\s-]?new|very\s+good|excellent|good|fair|acceptable"
+CONDITION_GRADES = r"premium|like[\s-]?new|very\s+good|excellent|good|fair|acceptable"
 
 # Condition word plus grade. The separator is optional because Walmart writes
 # every form of it, and the family half is built from CONDITION_PATTERNS so the
