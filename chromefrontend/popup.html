@@ -8,32 +8,21 @@
     button { background: #0071dc; color: white; border: none; padding: 8px 12px; cursor: pointer; border-radius: 4px; width: 100%; font-size: 13px; }
     button:hover:enabled { background: #0056a8; }
     button:disabled { background: #9bb8d4; cursor: default; }
-    #sheets-btn { background: #0f9d58; margin-top: 6px; }
-    #sheets-btn:hover:enabled { background: #0b8043; }
-    #sheets-btn:disabled { background: #a8d5bd; }
     #status { font-size: 12px; margin: 8px 0 4px; color: #333; word-break: break-word; }
     #status.error { color: #b3261e; }
     #summary { font-size: 12px; max-height: 220px; overflow-y: auto; }
     #summary > div { padding: 1px 0; }
     #summary .k { display: inline-block; width: 84px; color: #666; }
     #summary .refurb { color: #0a7c42; }
-    #settings { margin-top: 10px; border-top: 1px solid #e3e3e3; padding-top: 8px; }
-    #settings label { font-size: 11px; color: #666; display: block; margin-bottom: 3px; }
-    #backend-url { width: 100%; box-sizing: border-box; font-size: 11px; padding: 4px; border: 1px solid #ccc; border-radius: 3px; font-family: ui-monospace, monospace; }
     pre { text-align: left; background: #f4f4f4; padding: 6px; font-size: 11px; max-height: 180px; overflow: auto; display: none; border-radius: 4px; }
   </style>
 </head>
 <body>
-  <h3>Product Data Grabber</h3>
+  <h3>Walmart Product Data Grabber</h3>
   <button id="scrape-btn">Scrape this page</button>
-  <button id="sheets-btn" disabled>Send to Google Sheets</button>
   <p id="status">Open any product page, then click above.</p>
   <div id="summary"></div>
   <pre id="output"></pre>
-  <div id="settings">
-    <label for="backend-url">Backend URL</label>
-    <input id="backend-url" type="url" spellcheck="false" placeholder="https://walmart-scraper-mdp2.onrender.com">
-  </div>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -1,10 +1,9 @@
-// Not a constant any more: the same extension has to talk to a local dev
-// server or a deployed one. Loaded from chrome.storage.sync at popup open,
-// falling back to this when nothing is stored — the deployed backend, so a
-// fresh install works without setup. For local work, put http://127.0.0.1:8000
-// in the Backend URL field; that is stored and wins over this default.
+
+const USE_LOCAL = false;
+
+const LOCAL_BACKEND = 'http://127.0.0.1:8000';
 const DEFAULT_BACKEND = 'https://walmart-scraper-mdp2.onrender.com';
-let BACKEND = DEFAULT_BACKEND;
+const BACKEND = USE_LOCAL ? LOCAL_BACKEND : DEFAULT_BACKEND;
 
 // Trailing slashes double up when concatenated with a path, producing a 404
 // that looks like a missing endpoint rather than a typo.
@@ -22,19 +21,13 @@ const status = document.getElementById('status');
 const summary = document.getElementById('summary');
 const output = document.getElementById('output');
 const button = document.getElementById('scrape-btn');
-const sheetsButton = document.getElementById('sheets-btn');
-const backendInput = document.getElementById('backend-url');
 
-// Item ids from the most recent scrape. The export endpoint takes ids rather
-// than "everything saved", so the button pushes the page you are looking at
-// instead of re-uploading the whole CSV every time.
+
+// Item ids from the most recent scrape
 let lastScrapedIds = [];
 
 // Runs inside the page, not the popup. Returns the rendered HTML so the
-// backend does the parsing — one scraper, not one per site. Reading
-// documentElement (rather than fetching the URL again) is the whole point:
-// it is the DOM after hydration, with the user's own session, so it works on
-// any product page in any tab without a per-site integration.
+// ReadingdocumentElement (rather than fetching the URL again) is the whole point:
 function grabPageHtml() {
   return {
     url: location.href,
@@ -56,15 +49,17 @@ function row(label, value) {
 function describeProduct(product) {
   const parts = [];
   for (const field of SUMMARY_FIELDS) {
-    const value = product[field];
+    // A grade is what a reseller prices against, so show "Restored: Like New"
+    // in place of the bucket it normalizes to.
+    const value = field === 'condition' ? (product.conditionDetail ?? product.condition)
+      : product[field];
     if (value === null || value === undefined || value === '') continue;
     parts.push(row(field, field === 'price' ? `${product.currency ?? '$'}${value}` : value));
   }
   return parts;
 }
 
-// A grid gets a compact price + title list; showing every field for 40 items
-// would bury the thing the user actually wants to see.
+//  gets a compact price + title list
 function describeListing(products) {
   return products.map((product) => {
     const price = product.price === null ? '—' : `$${product.price}`;
@@ -114,30 +109,9 @@ async function post(payload, path = '/api/scrape-page') {
   return body;
 }
 
-async function sendToSheets() {
-  sheetsButton.disabled = true;
-  status.classList.remove('error');
-  status.textContent = 'Sending to Google Sheets…';
-
-  try {
-    const result = await post({ mode: 'append', itemIds: lastScrapedIds }, '/api/export/sheets');
-    // "Updated" is its own count, not a kind of skip: it means a row that was
-    // already there had blanks a fresh scrape could fill.
-    const updated = result.rowsUpdated ? `, ${result.rowsUpdated} filled in` : '';
-    const skipped = result.skipped ? `, ${result.skipped} already there` : '';
-    status.textContent = `Added ${result.rowsWritten} row(s) to ${result.tab}${updated}${skipped}`;
-  } catch (error) {
-    console.error(error);
-    status.textContent = error.message;
-    status.classList.add('error');
-  } finally {
-    sheetsButton.disabled = lastScrapedIds.length === 0;
-  }
-}
 
 async function scrapeActiveTab() {
   button.disabled = true;
-  sheetsButton.disabled = true;
   lastScrapedIds = [];
   summary.replaceChildren();
   output.style.display = 'none';
@@ -175,7 +149,7 @@ async function scrapeActiveTab() {
     // Rows without an id cannot be addressed by the export endpoint, so they
     // are dropped here rather than failing server-side.
     lastScrapedIds = products.map((p) => p.itemId).filter(Boolean).map(String);
-    sheetsButton.disabled = lastScrapedIds.length === 0;
+
 
     output.style.display = 'block';
     output.textContent = JSON.stringify(products, null, 2);
@@ -193,33 +167,4 @@ button.addEventListener('click', () => {
   scrapeActiveTab();
 });
 
-sheetsButton.addEventListener('click', sendToSheets);
-
-// Persist on edit rather than behind a save button: one field, and a settings
-// value that silently failed to save is worse than an extra write.
-backendInput.addEventListener('change', async () => {
-  try {
-    BACKEND = normalizeBackend(backendInput.value);
-    backendInput.value = BACKEND;
-    await chrome.storage.sync.set({ backendUrl: BACKEND });
-    status.classList.remove('error');
-    status.textContent = `Backend set to ${BACKEND}`;
-  } catch (error) {
-    status.textContent = error.message;
-    status.classList.add('error');
-  }
-});
-
-// Load the stored backend before the user can click anything, so the first
-// scrape after opening the popup cannot race the read and hit localhost.
-(async () => {
-  button.disabled = true;
-  try {
-    const { backendUrl } = await chrome.storage.sync.get('backendUrl');
-    BACKEND = normalizeBackend(backendUrl);
-  } catch {
-    BACKEND = DEFAULT_BACKEND;
-  }
-  backendInput.value = BACKEND;
-  button.disabled = false;
-})();
+BACKEND = DEFAULT_BACKEND;
