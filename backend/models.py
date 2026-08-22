@@ -10,6 +10,11 @@ class Product(BaseModel):
     price: float | None = None
     currency: str | None = None
     condition: str | None = None  # new | refurbished | used | open_box
+    # The graded form of the same thing, as a shopper sees it: "Restored: Like
+    # New", "Pre-Owned: Good". Kept beside `condition` rather than folded into
+    # it so that bucket stays a fixed vocabulary. None when the page grades
+    # nothing, which is most of them.
+    conditionDetail: str | None = None
     availability: str | None = None
     sku: str | None = None
     itemId: str | None = None

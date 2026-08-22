@@ -47,13 +47,45 @@ BROWSER_HEADERS = {
 }
 
 # Ordered: the first pattern that matches the title/description wins, so
-# "certified refurbished" must be checked before bare "used".
+# "certified refurbished" must be checked before bare "used". The groups are
+# non-capturing because CONDITION_DETAIL below is assembled out of them.
 CONDITION_PATTERNS = [
-    ("refurbished", r"\b(refurb(ished)?|renewed|reconditioned|certified\s+pre[\s-]?owned)\b"),
-    ("open_box", r"\b(open[\s-]?box|opened[\s-]?box)\b"),
-    ("used", r"\b(used|pre[\s-]?owned|second[\s-]?hand)\b"),
-    ("new", r"\b(brand[\s-]?new|new)\b"),
+    # "Restored" is Walmart's own word for refurbished, and the one its
+    # listings actually use.
+    ("refurbished",
+     r"\b(?:restored|refurb(?:ished)?|renewed|reconditioned|certified\s+pre[\s-]?owned)\b"),
+    ("open_box", r"\b(?:open[\s-]?box|opened[\s-]?box)\b"),
+    ("used", r"\b(?:used|pre[\s-]?owned|second[\s-]?hand)\b"),
+    ("new", r"\b(?:brand[\s-]?new|new)\b"),
 ]
+
+# Walmart's display wording for each bucket, and the only copy of it: these
+# strings end up in front of a human reading the sheet, and "used" is not what
+# the site calls it.
+CONDITION_LABELS = {
+    "new": "New",
+    "used": "Pre-Owned",
+    "refurbished": "Restored",
+    "open_box": "Open Box",
+}
+
+
+CONDITION_GRADES = r"like[\s-]?new|very\s+good|excellent|good|fair|acceptable"
+
+# Condition word plus grade. The separator is optional because Walmart writes
+# every form of it, and the family half is built from CONDITION_PATTERNS so the
+# two cannot drift apart. "new" is left out: a new item has no grade.
+CONDITION_DETAIL = re.compile(
+    r"(?P<family>{})\s*[:,\u2013\u2014-]?\s*(?P<grade>{})\b".format(
+        "|".join(pattern for name, pattern in CONDITION_PATTERNS if name != "new"),
+        CONDITION_GRADES,
+    ),
+    re.I,
+)
+
+# A picker grouped under a "Condition" heading labels its options with the
+# grade alone, leaving the family word to come from the condition itself.
+CONDITION_GRADE_ONLY = re.compile(rf"\s*(?:{CONDITION_GRADES})\s*", re.I)
 
 # Bot walls answer with HTTP 200 and a challenge page, so a non-2xx check is
 # not enough — Walmart redirects to /blocked and serves "Robot or human?".
@@ -130,12 +162,40 @@ def detect_condition(*texts: str | None) -> str | None:
     blob = " ".join(t for t in texts if t).lower()
     if not blob:
         return None
-    # Walmart's own word for refurbished is "Restored".
-    if re.search(r"\brestored\b", blob):
-        return "refurbished"
     for name, pattern in CONDITION_PATTERNS:
         if re.search(pattern, blob):
             return name
+    return None
+
+
+def reconcile_condition(condition: str | None, *texts: str | None) -> str | None:
+    """Settle the bucket between what a page's data says and what its text says.
+    """
+    from_text = detect_condition(*texts)
+    if from_text and from_text != "new" and condition in (None, "new"):
+        return from_text
+    return condition or from_text
+
+
+def _grade(text: str) -> str:
+    """"like  new" -> "Like New"."""
+    return re.sub(r"[\s-]+", " ", text).strip().title()
+
+
+def detect_condition_detail(*texts: str | None,
+                            condition: str | None = None) -> str | None:
+    for text in texts:
+        if not text:
+            continue
+        match = CONDITION_DETAIL.search(text)
+        if match:
+            label = CONDITION_LABELS.get(detect_condition(match.group("family")))
+            if label:
+                return f"{label}: {_grade(match.group('grade'))}"
+        elif CONDITION_GRADE_ONLY.fullmatch(text) and condition != "new":
+            label = CONDITION_LABELS.get(condition)
+            if label:
+                return f"{label}: {_grade(text)}"
     return None
 
 
@@ -499,6 +559,9 @@ def _apply_product_node(node: dict, keys: dict[str, str], product: Product) -> N
         elif field == "condition":
             # Sites write "Refurbished", "Pre-Owned", "NEW" — route through the
             # same matcher the title uses instead of trusting the raw string.
+            # The grade, when the field carries one, is kept alongside it.
+            _fill(product, "conditionDetail",
+                  detect_condition_detail(_clean(value)), "embedded-json")
             value = detect_condition(_clean(value))
         else:
             value = _clean(value)
@@ -506,6 +569,7 @@ def _apply_product_node(node: dict, keys: dict[str, str], product: Product) -> N
             if field in ("gtin", "upc", "itemId", "sku", "mpn") and value:
                 value = value.split(".")[0] if re.fullmatch(r"\d+\.0", value) else value
         _fill(product, field, value, "embedded-json")
+
 
     price_value = _lookup(node, keys, PRICE_ALIASES)
     if price_value is not None:
@@ -597,6 +661,33 @@ def _page_hints(soup: BeautifulSoup, url: str | None) -> tuple[set[str], set[str
     return ids, _tokens(_clean(name))
 
 
+# Variant pickers mark the shopper's current choice, and on a Restored listing
+# that choice is the grade ("Restored - Like New") even when the title says only
+# "Restored". Found by shape — a selected flag plus a label — because the path
+# to Walmart's variant list is renamed without notice.
+SELECTED_KEYS = ("selected", "isselected", "isvariantselected")
+VARIANT_LABEL_ALIASES = ("name", "value", "displayname", "label", "variantvalue")
+
+
+def _selected_variant_text(node: dict, keys: dict[str, str]) -> str | None:
+    """The label of a selected variant option, if it speaks about condition.
+
+    Returned in the page's own words: the family word may be missing, and it
+    cannot be supplied until the condition itself is settled.
+    """
+    if not any(node[keys[key]] in (True, "true", "True")
+               for key in SELECTED_KEYS if key in keys):
+        return None
+    for alias in VARIANT_LABEL_ALIASES:
+        if alias not in keys:
+            continue
+        text = _clean(node[keys[alias]])
+        if text and (CONDITION_DETAIL.search(text)
+                     or CONDITION_GRADE_ONLY.fullmatch(text)):
+            return text
+    return None
+
+
 def from_embedded_json(soup: BeautifulSoup, product: Product,
                        url: str | None = None) -> None:
     hint_ids, hint_name = _page_hints(soup, url)
@@ -606,6 +697,9 @@ def from_embedded_json(soup: BeautifulSoup, product: Product,
     for blob in _iter_state_blobs(soup):
         for node in _walk_dicts(blob):
             keys = _index(node)
+            if product.conditionDetail is None:
+                _fill(product, "conditionDetail",
+                      _selected_variant_text(node, keys), "variant-selected")
             score = _score(node, keys)
             if score >= PRODUCT_MIN_SCORE:
                 signals = _signals(node, keys)
@@ -792,9 +886,25 @@ def scrape_html(html: str, url: str | None = None) -> Product:
     from_url_shape(soup, product, url)
     from_selectors(soup, product, product.url or url)
 
-    if product.condition is None:
-        inferred = detect_condition(product.title, product.description)
-        _fill(product, "condition", inferred, "inferred-from-text")
+    condition = reconcile_condition(product.condition, product.title, product.description)
+
+    # conditionDetail may still hold a variant option in the page's own words
+    # ("Restored - Like New", or just "Like New"). Canonicalize it here, and
+    # fall back to the title, because only now is the bucket that a bare grade
+    # needs for its family word settled.
+    product.conditionDetail = detect_condition_detail(
+        product.conditionDetail, product.title, condition=condition,
+    )
+    # A grade names its own family, so it can be more specific than anything
+    # the title said: "Restored: Very Good" off a variant makes it refurbished.
+    condition = reconcile_condition(condition, product.conditionDetail)
+    if condition != product.condition:
+        product.condition = condition
+        product.sources["condition"] = "inferred-from-text"
+    if product.conditionDetail:
+        product.sources.setdefault("conditionDetail", "inferred-from-text")
+    else:
+        product.sources.pop("conditionDetail", None)
 
     return product
 

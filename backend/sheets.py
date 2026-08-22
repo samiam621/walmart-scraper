@@ -70,10 +70,6 @@ def _load_key() -> dict:
 
 def _parse_key(raw: str) -> dict:
     """Parse a key from raw JSON or from base64-encoded JSON.
-
-    base64 is offered because dashboard env-var fields mangle the key: the
-    private_key is one line with literal \n escapes, and a UI that "helpfully"
-    reformats or strips them yields a key that parses but cannot sign.
     """
     text = raw.strip()
 
@@ -226,7 +222,7 @@ def push(records, mode: str = "append") -> dict:
     else:
         existing = _existing_rows(worksheet)
 
-        # Read the rows we might update in one call rather than one per row.
+        # Read the rows we might update in one call rather than one per row
         current = worksheet.get_all_values() if existing else []
 
         new_rows, updates = [], []

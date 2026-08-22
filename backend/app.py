@@ -9,9 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from dotenv import load_dotenv
 
-# Before anything reads os.getenv. The .env lives at the repo root, not next
-# to this file, so uvicorn picks it up no matter which directory you start it
-# from. Real environment variables already set win over the file.
+
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import export  # noqa: E402 - must follow load_dotenv
@@ -25,11 +23,7 @@ from scraper import BlockedError, scrape_html, scrape_url
 
 app = FastAPI(title="Product Scraper")
 
-# A bare extension id is not an origin and will never match the Origin header
-# the browser sends, so it has to be prefixed with the scheme. Set
-# EXTENSION_IDS to a comma-separated list to lock this down; unset, it accepts
-# any unpacked extension, which is what you want while developing since the id
-# changes every time you reload from a different directory.
+
 EXTENSION_IDS = [i.strip() for i in os.getenv("EXTENSION_IDS", "").split(",") if i.strip()]
 CORS_ORIGINS = (
     {"allow_origins": [f"chrome-extension://{i}" for i in EXTENSION_IDS]}
@@ -37,11 +31,7 @@ CORS_ORIGINS = (
     else {"allow_origin_regex": r"chrome-extension://[a-p]{32}"}
 )
 
-# On a host with no persistent disk, products.csv does not survive a deploy or
-# an idle spin-down, so a scrape that is only written to the CSV is a scrape
-# you will lose. Pushing each one to the sheet as it happens makes the sheet
-# the durable record. Harmless when Sheets is unconfigured — the push reports
-# that it was skipped and the scrape is unaffected either way.
+
 AUTO_EXPORT_SHEETS = os.getenv("AUTO_EXPORT_SHEETS", "true").strip().lower() not in (
     "0", "false", "no", "off", ""
 )

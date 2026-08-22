@@ -39,7 +39,8 @@ from scraper import (
     _node_types,
     _score,
     _to_float,
-    detect_condition,
+    detect_condition_detail,
+    reconcile_condition,
 )
 
 # How many products the *merged* grid must have before the page counts as a
@@ -167,11 +168,18 @@ def _row_to_product(row: dict, base_url: str | None) -> Product:
             product.sources["url"] = "listing-row"
             break
 
-    if product.condition is None:
-        inferred = detect_condition(product.title, product.description)
-        if inferred:
-            product.condition = inferred
-            product.sources["condition"] = "inferred-from-text"
+    condition = reconcile_condition(product.condition, product.title, product.description)
+    if condition != product.condition:
+        product.condition = condition
+        product.sources["condition"] = "inferred-from-text"
+
+    if product.conditionDetail is None:
+        # Tiles put the whole thing in the title: "Restored Apple iPhone 13 -
+        # Like New". There is no variant picker on a grid to read instead.
+        detail = detect_condition_detail(product.title, condition=product.condition)
+        if detail:
+            product.conditionDetail = detail
+            product.sources["conditionDetail"] = "inferred-from-text"
 
     return product
 

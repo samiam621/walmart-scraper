@@ -10,7 +10,8 @@ carries:
                rot; /ip/{itemId} is the stable address for the same item.
   Image URL    Walmart serves whatever size the page asked for. Pinning the
                odn* params gets the 2000px original instead of a thumbnail.
-  Condition    see resolve_condition() — Walmart's JSON-LD lies about this.
+  Condition    see resolve_condition() — Walmart's JSON-LD lies about this,
+               and a grade ("Restored: Like New") outranks the bare bucket.
 
 Everything here works on plain dicts as well as Product objects, because the
 CSV round-trip hands back dicts of strings and both paths feed the same sheet.
@@ -29,21 +30,6 @@ COLUMNS = [
     "Other Identifier",
     "Listing URL",
 ]
-
-# Walmart's display wording, not schema.org's. These strings end up in front
-# of a human reading the sheet, and "used" is not what the site calls it.
-CONDITION_LABELS = {
-    "new": "New",
-    "used": "Pre-Owned",
-    "refurbished": "Restored",
-    "open_box": "Open Box",
-}
-
-# Grade suffixes Walmart appends to pre-owned listings ("Pre-Owned: Good").
-# Only trusted off the title, where the seller wrote it.
-CONDITION_GRADE = re.compile(
-    r"pre[\s-]?owned\s*:?\s*(good|fair|excellent|like\s*new)", re.I
-)
 
 _ITEM_ID_IN_PATH = re.compile(r"/ip/(?:.*/)?(\d{6,})")
 
@@ -86,34 +72,28 @@ def to_gtin14(*candidates: str | None) -> str | None:
 def resolve_condition(record) -> str | None:
     """Work out what condition the item is actually in.
 
-    Walmart's JSON-LD reports NewCondition on pre-owned marketplace listings —
-    the iPad in example.xlsx is titled "Pre-Owned" and served under
-    conditionGroupCode=3, yet its offer says new. So a used/refurbished signal
-    in the seller-written title outranks a schema that merely says "new"; a
-    schema saying anything *other* than new is specific enough to trust.
+    The graded form wins when there is one, so "Restored: Like New" reaches the
+    sheet rather than the bucket it normalizes to.
+
+    Both the bucket and the grade are re-derived from the record rather than
+    trusted as stored: a row read back from the CSV may have been written
+    before either rule existed. See reconcile_condition() for why a title
+    outranks the schema.
     """
-    from scraper import detect_condition  # local: scraper imports nothing here
+    # Local import: export.py is usable without the scraper's dependencies.
+    from scraper import CONDITION_LABELS, detect_condition_detail, reconcile_condition
 
-    condition = _get(record, "condition")
     title = _get(record, "title")
+    condition = reconcile_condition(_get(record, "condition"), title)
 
-    from_title = detect_condition(title)
-    if from_title and from_title != "new" and (condition is None or condition == "new"):
-        condition = from_title
+    detail = detect_condition_detail(_get(record, "conditionDetail"), title,
+                                     condition=condition)
+    if detail:
+        return detail
 
     if condition is None:
         return None
-
-    label = CONDITION_LABELS.get(condition, condition.replace("_", " ").title())
-
-    # Preserve the grade when the title carries one, so "Pre-Owned: Good"
-    # survives the round trip through the normalized bucket.
-    if condition == "used" and title:
-        match = CONDITION_GRADE.search(title)
-        if match:
-            grade = re.sub(r"\s+", " ", match.group(1)).strip().title()
-            return f"Pre-Owned: {grade}"
-    return label
+    return CONDITION_LABELS.get(condition, condition.replace("_", " ").title())
 
 
 def resolve_item_id(record) -> str | None:

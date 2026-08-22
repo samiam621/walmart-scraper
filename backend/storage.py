@@ -23,9 +23,31 @@ FILE_PATH = DATA_DIR / "products.csv"
 FIELDNAMES = [name for name in Product.model_fields if name != "sources"]
 
 
+def _align_columns(path: Path) -> None:
+    """Rewrite a CSV whose header predates a field the model has since gained.
+
+    Appending in the current column order under an older header is exactly the
+    silent misalignment this module exists to avoid — the header has to catch
+    up first, and the rows already written get an empty cell for the new field.
+    """
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames == FIELDNAMES:
+            return
+        rows = list(reader)
+
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=FIELDNAMES)
+        writer.writeheader()
+        writer.writerows({name: row.get(name) or "" for name in FIELDNAMES}
+                         for row in rows)
+
+
 def save_product(product: Product, path: Path = FILE_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     is_new = not path.exists() or path.stat().st_size == 0
+    if not is_new:
+        _align_columns(path)
 
     row = product.model_dump(exclude={"sources"})
     with path.open("a", newline="", encoding="utf-8") as handle:
