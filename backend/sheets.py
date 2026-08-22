@@ -175,18 +175,23 @@ def _existing_rows(worksheet) -> dict[str, int]:
     }
 
 
+def _refines(new: str, old: str) -> bool:
+    """True when `new` is `old` plus a grade: "Restored" -> "Restored: Like New".
+    """
+    return new.startswith(f"{old}: ")
+
+
 def _merge_row(old: list, new: list) -> list | None:
     """Fill blanks in an existing row from a fresh scrape. None if unchanged.
-
-    Only empty cells are written. A re-scrape is allowed to complete a row,
-    never to overwrite it: the sheet is the durable record and may have been
-    edited by hand, and a later scrape of the same item can legitimately carry
-    *less* than the first (a grid tile after a product page).
     """
+    condition_column = export.COLUMNS.index("Item Condition")
     merged = list(old) + [""] * (len(export.COLUMNS) - len(old))
     changed = False
     for index, value in enumerate(new):
-        if str(value).strip() and not str(merged[index]).strip():
+        value, current = str(value).strip(), str(merged[index]).strip()
+        if not value:
+            continue
+        if not current or (index == condition_column and _refines(value, current)):
             merged[index] = value
             changed = True
     return merged if changed else None

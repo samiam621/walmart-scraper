@@ -321,6 +321,10 @@ JSON_ALIASES: dict[str, tuple[str, ...]] = {
                   "imageurl", "image"),
     "availability": ("availabilitystatus", "availability", "stockstatus",
                      "inventorystatus"),
+    # Walmart states the grade in its own field rather than in the title, and
+    # states it fully formed ("Restored: Like New"). Ahead of "condition" so
+    # the dedicated field wins over a grade parsed out of a condition string.
+    "conditionDetail": ("preownedcondition", "conditiondetail", "conditiongrade"),
     "condition": ("condition", "itemcondition", "conditiontype"),
 }
 
@@ -554,6 +558,8 @@ def _apply_product_node(node: dict, keys: dict[str, str], product: Product) -> N
             continue
         if field == "imageLink":
             value = _descend_image(value)
+        elif field == "conditionDetail":
+            value = detect_condition_detail(_clean(value))
         elif field == "availability":
             value = normalize_availability(value)
         elif field == "condition":
