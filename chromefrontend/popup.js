@@ -2,7 +2,7 @@
 const USE_LOCAL = false;
 
 const LOCAL_BACKEND = 'http://127.0.0.1:8000';
-const DEFAULT_BACKEND = 'https://walmart-scraper-mdp2.onrender.com';
+const DEFAULT_BACKEND = 'https://walmart-scraper-wv29.onrender.com';
 const BACKEND = USE_LOCAL ? LOCAL_BACKEND : DEFAULT_BACKEND;
 
 // Trailing slashes double up when concatenated with a path, producing a 404
