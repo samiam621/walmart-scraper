@@ -182,7 +182,7 @@ def build_rows(records, *, header: bool = True, dedupe: bool = True) -> list[lis
     """Products -> sheet rows, newest scrape order preserved.
 
     Deduplicates on item id because re-scraping a page you already saved is
-    the normal way to use the extension, and the CSV keeps every append.
+    a common way to use the extension, and the CSV keeps every append.
     """
     rows: list[list] = [list(COLUMNS)] if header else []
     seen: set[str] = set()

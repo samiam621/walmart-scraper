@@ -4,7 +4,9 @@
   <meta charset="utf-8">
   <style>
     body { width: 280px; font-family: -apple-system, system-ui, sans-serif; padding: 10px; }
-    h3 { margin: 0 0 8px; font-size: 14px; }
+    .header { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+    .header img { width: 32px; height: 32px; flex-shrink: 0; }
+    h3 { margin: 0; font-size: 14px; }
     button { background: #0071dc; color: white; border: none; padding: 8px 12px; cursor: pointer; border-radius: 4px; width: 100%; font-size: 13px; }
     button:hover:enabled { background: #0056a8; }
     button:disabled { background: #9bb8d4; cursor: default; }
@@ -18,9 +20,12 @@
   </style>
 </head>
 <body>
-  <h3>Walmart Product Data Grabber</h3>
+  <div class="header">
+    <img src="" alt="">
+    <h3>Walmart Product Data Grabber</h3>
+  </div>
   <button id="scrape-btn">Scrape this page</button>
-  <p id="status">Open any product page, then click above.</p>
+  <p id="status">Open any product page, then click the button.</p>
   <div id="summary"></div>
   <pre id="output"></pre>
   <script src="popup.js"></script>

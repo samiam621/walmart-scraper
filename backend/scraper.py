@@ -255,16 +255,25 @@ def _node_types(node: dict) -> set[str]:
     return {str(t).lower() for t in raw}
 
 
+# A Walmart variant page is a ProductGroup wrapping one fully-described
+# Product — the variant the shopper has selected — plus a url-only stub for
+# every variant they have not. The group is read as well as the variant
+# because the rating covers the whole family and is stated only up there.
+PRODUCT_NODE_TYPES = frozenset({"product", "productgroup"})
+
+
 def from_jsonld(soup: BeautifulSoup, product: Product) -> None:
     for node in _iter_jsonld_nodes(soup):
-        if "product" not in _node_types(node):
+        if not _node_types(node) & PRODUCT_NODE_TYPES:
             continue
 
         _fill(product, "title", _clean(node.get("name")), "jsonld")
         _fill(product, "brand", _clean(node.get("brand")), "jsonld")
         _fill(product, "description", _clean(node.get("description")), "jsonld")
         _fill(product, "sku", _clean(node.get("sku")), "jsonld")
-        _fill(product, "mpn", _clean(node.get("mpn")), "jsonld")
+        # schema.org spells the manufacturer's number `model`, and that is the
+        # one Walmart fills. Without it a variant page has no MPN to offer.
+        _fill(product, "mpn", _clean(node.get("mpn") or node.get("model")), "jsonld")
         _fill(product, "gtin", _clean(node.get("gtin13") or node.get("gtin")), "jsonld")
         _fill(product, "upc", _clean(node.get("gtin12") or node.get("upc")), "jsonld")
         _fill(product, "imageLink", _clean(node.get("image")), "jsonld")
@@ -627,6 +636,37 @@ def _signals(node: dict, keys: dict[str, str]) -> set[str]:
     return found
 
 
+# Ids by which a node claims to be the page's *subject* rather than merely a
+# product it mentions. Deliberately far narrower than IDENTITY_ALIASES: a
+# Walmart blob names dozens of item ids across carousels, bundle tiles and ad
+# payloads, and any of those would otherwise look like the page's own.
+SUBJECT_ID_ALIASES = ("usitemid", "primaryusitemid")
+SUBJECT_URL_ALIASES = ("canonicalurl", "canonicalurlwithvariant")
+
+
+def _subject_ids(node: dict, keys: dict[str, str]) -> set[str]:
+    """The item ids a node asserts the surrounding blob was rendered for.
+
+    Only two things count as that assertion: an item id sitting beside a
+    product name, and a canonical /ip/ path. Both are things a page says about
+    itself; a carousel tile says neither.
+    """
+    found: set[str] = set()
+    for alias in SUBJECT_URL_ALIASES:
+        if alias in keys:
+            href = _clean(node[keys[alias]])
+            match = PATH_ID.search(urlparse(href).path) if href else None
+            if match:
+                found.add(match.group(1))
+    if _lookup(node, keys, JSON_ALIASES["title"]):
+        for alias in SUBJECT_ID_ALIASES:
+            if alias in keys:
+                value = _clean(node[keys[alias]])
+                if value:
+                    found.add(value)
+    return found
+
+
 def _tokens(text: str | None) -> set[str]:
     if not text:
         return set()
@@ -699,13 +739,23 @@ def from_embedded_json(soup: BeautifulSoup, product: Product,
     hint_ids, hint_name = _page_hints(soup, url)
     candidates: list[tuple[int, dict, dict[str, str]]] = []
     rating_nodes: list[tuple[dict, dict[str, str]]] = []
+    variant_texts: list[str] = []
 
+    # Accumulated per blob rather than across all of them, because a blob is
+    # accepted or rejected whole: whether it describes the item currently on
+    # screen is a fact about the blob, not about each node in it.
     for blob in _iter_state_blobs(soup):
+        blob_candidates: list[tuple[int, dict, dict[str, str]]] = []
+        blob_ratings: list[tuple[dict, dict[str, str]]] = []
+        blob_variants: list[str] = []
+        subjects: set[str] = set()
+
         for node in _walk_dicts(blob):
             keys = _index(node)
-            if product.conditionDetail is None:
-                _fill(product, "conditionDetail",
-                      _selected_variant_text(node, keys), "variant-selected")
+            subjects |= _subject_ids(node, keys)
+            text = _selected_variant_text(node, keys)
+            if text:
+                blob_variants.append(text)
             score = _score(node, keys)
             if score >= PRODUCT_MIN_SCORE:
                 signals = _signals(node, keys)
@@ -714,11 +764,35 @@ def from_embedded_json(soup: BeautifulSoup, product: Product,
                     score += URL_ID_BONUS
                 if _names_match(_lookup(node, keys, JSON_ALIASES["title"]), hint_name):
                     score += NAME_MATCH_BONUS
-                candidates.append((score, node, keys))
+                blob_candidates.append((score, node, keys))
             # Ratings usually live on their own object with no product name,
             # so they are collected separately rather than scored out.
             elif any(alias in keys for alias in RATING_ALIASES):
-                rating_nodes.append((node, keys))
+                blob_ratings.append((node, keys))
+
+        # Walmart swaps variants client-side: picking another colour rewrites
+        # the URL, the canonical link, og:title and the JSON-LD, but never
+        # __NEXT_DATA__, which keeps describing the item the page was first
+        # served for. Trusting it then stamps that item's id and barcode onto
+        # the row for the one actually on screen — and since the sheet keys on
+        # item id, the new variant silently merges into the old variant's row.
+        #
+        # Only a blob that positively claims a *different* subject is dropped.
+        # One that claims no subject at all is the ordinary case for the
+        # sibling payloads Walmart ships alongside, and still contributes.
+        if hint_ids and subjects and not subjects & hint_ids:
+            product.sources["_state_blob"] = (
+                f"skipped: describes item {sorted(subjects)[0]}, page is "
+                f"{sorted(hint_ids)[0]} (variant switched without a reload)"
+            )
+            continue
+
+        candidates.extend(blob_candidates)
+        rating_nodes.extend(blob_ratings)
+        variant_texts.extend(blob_variants)
+
+    for text in variant_texts:
+        _fill(product, "conditionDetail", text, "variant-selected")
 
     if candidates:
         # sort is stable, so equal scores keep document order and the first
@@ -853,7 +927,34 @@ SELECTORS: dict[str, list[str]] = {
     "price": ['[itemprop="price"]', '[data-seo-id="hero-price"]',
               '[data-testid="price-wrap"] span'],
     "title": ["h1#main-title", "h1[itemprop='name']", "#main-title"],
+    # Walmart prints the item id into the page as a hidden span. It is the one
+    # identifier that is re-rendered when a variant is picked, so it is right
+    # even when the tab's URL still carries the previous variant's slug.
+    "itemId": ['[data-testid="us-item-id"]'],
 }
+
+# The visible "Condition" card, which states the grade the shopper is buying.
+# Walmart puts no test id on it and its classes are utility soup, so it is
+# found by its heading and read from the nearest ancestor that also names a
+# grade — structure outlives styling. The reviews filter carries the same
+# heading and no grade, which is why the grade has to be there to match.
+CONDITION_HEADING = re.compile(r"^\s*condition\s*$", re.I)
+CONDITION_CARD_LEVELS = 5
+
+
+def _condition_card_detail(soup: BeautifulSoup) -> str | None:
+    for heading in soup.find_all(string=CONDITION_HEADING):
+        node = heading.parent
+        for _ in range(CONDITION_CARD_LEVELS):
+            if node is None:
+                break
+            match = CONDITION_DETAIL.search(node.get_text(" ", strip=True))
+            if match:
+                # The smallest enclosing box wins: widen far enough and the
+                # "more conditions from other sellers" panel comes with it.
+                return match.group(0)
+            node = node.parent
+    return None
 
 
 def from_selectors(soup: BeautifulSoup, product: Product, url: str | None) -> None:
@@ -871,6 +972,12 @@ def from_selectors(soup: BeautifulSoup, product: Product, url: str | None) -> No
             value = _to_float(text) if field == "price" else _clean(text)
             _fill(product, field, value, "selector")
             break
+
+    # Guarded rather than left to _fill: finding the card means walking every
+    # string on a multi-megabyte page, and a graded condition is the common
+    # case for a page whose state blob was usable.
+    if product.conditionDetail is None:
+        _fill(product, "conditionDetail", _condition_card_detail(soup), "condition-card")
 
 
 # --------------------------------------------------------------------------

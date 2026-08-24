@@ -8,3 +8,4 @@ backend/data/
 *.json
 !chromefrontend/manifest.json
 .env
+icons/

@@ -181,17 +181,26 @@ def _refines(new: str, old: str) -> bool:
     return new.startswith(f"{old}: ")
 
 
+# Columns a fresh scrape may *correct*, not merely fill. Every other
+# column stays fill-only — re-scraping must not revert a hand-edited title.
+CORRECTABLE_COLUMNS = ("GTIN", "Other Identifier")
+
+
 def _merge_row(old: list, new: list) -> list | None:
-    """Fill blanks in an existing row from a fresh scrape. None if unchanged.
+    """Fill blanks in an existing row from a fresh scrape, and correct an
+    identifier that disagrees with it. None if unchanged.
     """
     condition_column = export.COLUMNS.index("Item Condition")
+    correctable = {export.COLUMNS.index(name) for name in CORRECTABLE_COLUMNS}
     merged = list(old) + [""] * (len(export.COLUMNS) - len(old))
     changed = False
     for index, value in enumerate(new):
         value, current = str(value).strip(), str(merged[index]).strip()
-        if not value:
+        if not value or value == current:
             continue
-        if not current or (index == condition_column and _refines(value, current)):
+        if (not current
+                or index in correctable
+                or (index == condition_column and _refines(value, current))):
             merged[index] = value
             changed = True
     return merged if changed else None
@@ -200,8 +209,9 @@ def _merge_row(old: list, new: list) -> list | None:
 def push(records, mode: str = "append") -> dict:
     """Write products to the configured sheet.
 
-    append   adds rows for products the sheet does not have, and fills in
-             blank cells on the rows it does (see _merge_row)
+    append   adds rows for products the sheet does not have, fills in blank
+             cells on the rows it does, and corrects an identifier that
+             disagrees with the fresh scrape (see _merge_row)
     replace  clears the tab and rewrites it from the given products
 
     Values go up with value_input_option="RAW" so Sheets stores them verbatim.
@@ -262,7 +272,7 @@ def push(records, mode: str = "append") -> dict:
         "mode": mode,
         "rowsWritten": written,
         "rowsUpdated": updated,
-        # Genuinely nothing to do: already present *and* nothing to fill in.
+        #  nothing to do: already present *and* nothing to fill in.
         "skipped": len(all_rows) - written - updated,
         "tab": tab,
         "url": f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit",

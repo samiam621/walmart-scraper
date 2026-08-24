@@ -49,7 +49,7 @@ function row(label, value) {
 function describeProduct(product) {
   const parts = [];
   for (const field of SUMMARY_FIELDS) {
-    // A grade is what a reseller prices against, so show "Restored: Like New"
+    // show condition ex. "Restored: Like New"
     // in place of the bucket it normalizes to.
     const value = field === 'condition' ? (product.conditionDetail ?? product.condition)
       : product[field];
@@ -167,4 +167,3 @@ button.addEventListener('click', () => {
   scrapeActiveTab();
 });
 
-BACKEND = DEFAULT_BACKEND;
