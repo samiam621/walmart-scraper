@@ -72,13 +72,31 @@ CONDITION_LABELS = {
 
 CONDITION_GRADES = r"premium|like[\s-]?new|very\s+good|excellent|good|fair|acceptable"
 
+# The family half of the condition regexes below, built from CONDITION_PATTERNS
+# so the two cannot drift apart. "new" is left out: a new item has no grade.
+_CONDITION_FAMILY_PATTERN = "|".join(
+    pattern for name, pattern in CONDITION_PATTERNS if name != "new"
+)
+
 # Condition word plus grade. The separator is optional because Walmart writes
-# every form of it, and the family half is built from CONDITION_PATTERNS so the
-# two cannot drift apart. "new" is left out: a new item has no grade.
+# every form of it.
 CONDITION_DETAIL = re.compile(
     r"(?P<family>{})\s*[:,\u2013\u2014-]?\s*(?P<grade>{})\b".format(
-        "|".join(pattern for name, pattern in CONDITION_PATTERNS if name != "new"),
+        _CONDITION_FAMILY_PATTERN,
         CONDITION_GRADES,
+    ),
+    re.I,
+)
+
+# Same pair, but tolerating a little filler between them ("Certified
+# Refurbished | Grade A Like New"). The gap is capped and refuses to span
+# another family word so it can only ever join one family word to its nearest
+# grade -- an unbounded .* would cheerfully bridge two unrelated condition
+# mentions at opposite ends of a long title.
+CONDITION_DETAIL_LOOSE = re.compile(
+    r"(?P<family>{family})(?:(?!{family}).){{0,25}}?\b(?P<grade>{grades})\b".format(
+        family=_CONDITION_FAMILY_PATTERN,
+        grades=CONDITION_GRADES,
     ),
     re.I,
 )
@@ -86,6 +104,10 @@ CONDITION_DETAIL = re.compile(
 # A picker grouped under a "Condition" heading labels its options with the
 # grade alone, leaving the family word to come from the condition itself.
 CONDITION_GRADE_ONLY = re.compile(rf"\s*(?:{CONDITION_GRADES})\s*", re.I)
+
+CONDITION_GRADE_SUFFIX = re.compile(
+    rf"\b(?P<grade>{CONDITION_GRADES})\s+condition\b", re.I
+)
 
 # Bot walls answer with HTTP 200 and a challenge page, so a non-2xx check is
 # not enough — Walmart redirects to /blocked and serves "Robot or human?".
@@ -187,7 +209,9 @@ def detect_condition_detail(*texts: str | None,
     for text in texts:
         if not text:
             continue
-        match = CONDITION_DETAIL.search(text)
+        # Strict first, so every title that already extracts correctly is
+        # untouched; the loose form only adds coverage.
+        match = CONDITION_DETAIL.search(text) or CONDITION_DETAIL_LOOSE.search(text)
         if match:
             label = CONDITION_LABELS.get(detect_condition(match.group("family")))
             if label:
@@ -196,6 +220,12 @@ def detect_condition_detail(*texts: str | None,
             label = CONDITION_LABELS.get(condition)
             if label:
                 return f"{label}: {_grade(text)}"
+        elif condition != "new":
+            suffix = CONDITION_GRADE_SUFFIX.search(text)
+            if suffix:
+                label = CONDITION_LABELS.get(condition)
+                if label:
+                    return f"{label}: {_grade(suffix.group('grade'))}"
     return None
 
 

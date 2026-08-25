@@ -18,6 +18,7 @@ CSV round-trip hands back dicts of strings and both paths feed the same sheet.
 """
 
 import re
+from urllib.parse import urlparse
 
 # Column order follows example.xlsx, with Other Identifier inserted after the
 # GTIN it stands in for.
@@ -31,7 +32,16 @@ COLUMNS = [
     "Listing URL",
 ]
 
-_ITEM_ID_IN_PATH = re.compile(r"/ip/(?:.*/)?(\d{6,})")
+# Item ids are not all numbers. walmart.com uses a numeric id; walmart.ca uses
+# an alphanumeric token ("5O9UZWKNZ4LC"). Stripping one of those to its digits
+# invents a different item ("594"), so a number is only pulled out of a value
+# that is a number wearing a label ("Item #20539670270", "20539670270.0").
+_NUMERIC_ITEM_ID = re.compile(r"\A\D*(\d+)(?:\.0)?\D*\Z")
+_BARE_ITEM_ID = re.compile(r"\A[A-Za-z0-9]{4,}\Z")
+
+# Anchored at the end of the *path* so a slug segment cannot pose as an id:
+# "/ip/Refurbished-Apple-iPhone" has no id, and the hyphens are what say so.
+_ITEM_ID_IN_PATH = re.compile(r"/ip/(?:[^/]+/)?([A-Za-z0-9]{4,})/?\Z")
 
 # The size Walmart's own "view larger" uses. odnBg matters: without it
 # transparent PNGs composite onto black in some feed importers.
@@ -52,6 +62,24 @@ def _digits(value: str | None) -> str | None:
         return None
     digits = re.sub(r"\D", "", value)
     return digits or None
+
+
+def _item_id(value: str | None) -> str | None:
+    """Normalize an item id without assuming it is a number."""
+    if not value:
+        return None
+    text = value.strip()
+
+    numeric = _NUMERIC_ITEM_ID.match(text)
+    if numeric:
+        return numeric.group(1)
+    # A .ca token, kept verbatim — its letters carry meaning and its case is
+    # the case the storefront uses.
+    if _BARE_ITEM_ID.match(text):
+        return text
+    # Anything else is a mis-parse. A row with no id still gets its scraped
+    # URL, which beats a confidently wrong link.
+    return None
 
 
 def to_gtin14(*candidates: str | None) -> str | None:
@@ -102,16 +130,49 @@ def resolve_item_id(record) -> str | None:
     Grid tiles routinely parse without an explicit id while still linking to
     /ip/<id>, and a row with no id cannot be deduplicated or linked.
     """
-    item_id = _digits(_get(record, "itemId"))
+    item_id = _item_id(_get(record, "itemId"))
     if item_id:
         return item_id
 
     url = _get(record, "url")
     if url:
-        match = _ITEM_ID_IN_PATH.search(url)
+        match = _ITEM_ID_IN_PATH.search(urlparse(url).path)
         if match:
             return match.group(1)
     return None
+
+
+# domain -> (origin, default /ip prefix). walmart.ca serves every product page
+# under a locale segment and canonicalizes to it ("/en/ip/<slug>/<id>"), so the
+# bare "/ip/<id>" that works on .com is not the .ca address for the same item.
+_WALMART_STOREFRONTS = {
+    "walmart.ca": ("https://www.walmart.ca", "/en/ip"),
+    "walmart.com": ("https://www.walmart.com", "/ip"),
+}
+
+_LOCALE_IN_PATH = re.compile(r"\A/(en|fr)(?:/|\Z)")
+
+
+def _listing_base(record) -> str:
+    """Rebuild the canonical link against the storefront the product was
+    actually scraped from — a .ca item must not get a walmart.com link."""
+    parts = urlparse(_get(record, "url") or "")
+    # Strip any userinfo and port so "www.walmart.ca:443" still matches.
+    host = parts.netloc.lower().rsplit("@", 1)[-1].split(":", 1)[0]
+
+    # No usable URL (grid tiles sometimes arrive without one) — .com is the
+    # storefront the scraper sees most.
+    origin, prefix = _WALMART_STOREFRONTS["walmart.com"]
+    for domain, storefront in _WALMART_STOREFRONTS.items():
+        if host == domain or host.endswith("." + domain):
+            origin, prefix = storefront
+            break
+
+    # Keep the locale the shopper was actually on; the table's is a fallback.
+    locale = _LOCALE_IN_PATH.match(parts.path)
+    if locale:
+        prefix = f"/{locale.group(1)}/ip"
+    return origin + prefix
 
 
 def canonical_listing_url(record) -> str | None:
@@ -120,7 +181,7 @@ def canonical_listing_url(record) -> str | None:
     item_id = resolve_item_id(record)
 
     if item_id:
-        return f"https://www.walmart.com/ip/{item_id}"
+        return f"{_listing_base(record)}/{item_id}"
     return url
 
 
@@ -160,6 +221,12 @@ def other_identifier(record, gtin: str | None) -> str | None:
     return None
 
 
+def _sheet_item_id(item_id: str | None) -> int | str:
+    if not item_id:
+        return ""
+    return int(item_id) if item_id.isdigit() else item_id
+
+
 def product_to_row(record) -> list:
     """One product -> one sheet row, in COLUMNS order."""
     gtin = to_gtin14(_get(record, "gtin"), _get(record, "upc"))
@@ -169,9 +236,10 @@ def product_to_row(record) -> list:
         _get(record, "title") or "",
         resolve_condition(record) or "",
         full_size_image(record) or "",
-        # Sent as an int so the sheet stores it as a number, matching the
-        # example. GTIN stays a string: its leading zeros are significant.
-        int(item_id) if item_id else "",
+        # A numeric (.com) id is sent as an int so the sheet stores it as a
+        # number, matching the example. A .ca id is alphanumeric and stays a
+        # string. GTIN stays a string too: its leading zeros are significant.
+        _sheet_item_id(item_id),
         gtin or "",
         other_identifier(record, gtin) or "",
         canonical_listing_url(record) or "",
