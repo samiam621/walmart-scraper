@@ -124,6 +124,16 @@ async function post(payload, path = '/api/scrape-page') {
 }
 
 
+// Which sheet the rows landed in, since one page can only ever be one
+// storefront but the count alone would not say which.
+function describeExport(exported) {
+  const sheets = exported.sheets ?? [];
+  if (!sheets.length) return 'nothing new to Sheets';
+  const parts = sheets.map((sheet) => `${sheet.rowsWritten} to ${sheet.country}`);
+  return parts.join(', ') + (exported.skipped ? `, ${exported.skipped} dup` : '');
+}
+
+
 async function scrapeActiveTab() {
   button.disabled = true;
   lastScrapedIds = [];
@@ -154,10 +164,15 @@ async function scrapeActiveTab() {
     if (exported) {
       status.append(document.createTextNode(
         exported.ok
-          ? ` · ${exported.rowsWritten} to Sheets${exported.skipped ? `, ${exported.skipped} dup` : ''}`
+          ? ` · ${describeExport(exported)}`
           : ' · not sent to Sheets',
       ));
       if (!exported.ok) summary.append(row('Sheets', exported.reason));
+      // A country with no GOOGLE_SHEET_ID_* set writes nothing while the rest
+      // of the page succeeds, so the overall ok flag will not show it.
+      for (const problem of exported.errors ?? []) {
+        summary.append(row('Sheets', problem.reason));
+      }
     }
 
     // Only present when the page had Spanish titles to translate. A miss

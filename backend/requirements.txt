@@ -7,5 +7,4 @@ lxml
 gspread
 google-auth
 python-dotenv
-deep-translator
 google-cloud-translate

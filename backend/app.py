@@ -192,8 +192,9 @@ async def _translate_titles(products: list[Product]) -> dict | None:
     to translate, so an ordinary walmart.com scrape says nothing about it.
     """
     try:
-        # deep_translator is blocking, and this runs inside an async
-        # endpoint; without the thread it would stall every other request.
+        # The Cloud Translation client is blocking, and this runs inside
+        # an async endpoint; without the thread it would stall every other
+        # request.
         report = await asyncio.to_thread(translate.annotate_all, products)
     except Exception as exc:  # noqa: BLE001 - see docstring
         return {

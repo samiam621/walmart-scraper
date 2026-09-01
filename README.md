@@ -174,6 +174,26 @@ Keep the key outside the repo and `chmod 600` it. It is a live credential to
 every file you shared with that service account, and it is not password
 protected — anyone who reads the file has that access.
 
+### Translating Mexican titles
+
+`walmart.com.mx` titles are Spanish, and the sheet wants English. That runs
+through the Cloud Translation API on the **same service account** — no second
+key, no new environment variable, just a different scope requested against the
+credential you already configured above. Two extra steps on that project:
+
+1. Enable the **Cloud Translation API**, alongside the Google Sheets API.
+2. **IAM & Admin → IAM**, and grant the service account **Cloud Translation
+   API User** (`roles/cloudtranslate.user`). Unlike Sheets, this one is a real
+   project-level role — there is no file to share instead.
+
+Every distinct title on a page goes up in a single request, so a grid costs
+one call rather than one per product. Titles run 50–80 characters, which keeps
+a normal month inside the 500k-character free tier.
+
+Translation is best effort: if it is unconfigured or the API is unreachable,
+the scrape still succeeds and the popup reports what could not be translated
+rather than failing the page.
+
 ### Pushing
 
 Click **Send to Google Sheets** in the extension after a scrape, or:
