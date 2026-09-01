@@ -141,7 +141,7 @@ async def scrape_page(request: ScrapeRequest, save: bool = True):
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"Fetch failed: {exc}") from exc
-        return await _respond([product], "product", save)
+        return await _respond([product], "product", save, request.url)
 
     soup = BeautifulSoup(html, "lxml")
     kind = listing.page_type(url=url, soup=soup)
@@ -154,7 +154,7 @@ async def scrape_page(request: ScrapeRequest, save: bool = True):
         products = listing.scrape_listing_soup(soup, url)
 
     if products:
-        return await _respond(products, "listing", save)
+        return await _respond(products, "listing", save, url)
 
     single = scrape_html(html, url=url)
     if single.price is None and not (single.itemId or single.upc or single.sku or single.gtin):
@@ -165,10 +165,10 @@ async def scrape_page(request: ScrapeRequest, save: bool = True):
                 "identifier for a single product."
             ),
         )
-    return await _respond([single], "product", save)
+    return await _respond([single], "product", save, url)
 
 
-async def _respond(products: list[Product], kind: str, save: bool) -> dict:
+async def _respond(products: list[Product], kind: str, save: bool, page_url: str | None) -> dict:
     translation = await _translate_titles(products)
 
     if save:
@@ -179,7 +179,7 @@ async def _respond(products: list[Product], kind: str, save: bool) -> dict:
     if translation:
         payload["translation"] = translation
     if save and AUTO_EXPORT_SHEETS:
-        payload["export"] = await _push_to_sheets(products)
+        payload["export"] = await _push_to_sheets(products, page_url)
     return payload
 
 
@@ -209,14 +209,17 @@ async def _translate_titles(products: list[Product]) -> dict | None:
     return report
 
 
-async def _push_to_sheets(products: list[Product]) -> dict:
+async def _push_to_sheets(products: list[Product], page_url: str | None) -> dict:
     """Best-effort export. Never raises — a scrape that parsed correctly is
     still a success even if Google is unreachable, and the rows stay in the
-    CSV for the next push to pick up."""
+    CSV for the next push to pick up.
+
+    page_url routes grid tiles that arrived without a URL of their own to the
+    sheet for the storefront they were actually scraped from."""
     try:
         # gspread is blocking, and this runs inside an async endpoint; without
         # the thread it would stall every other request for the round trip.
-        result = await asyncio.to_thread(sheets.push, products, "append")
+        result = await asyncio.to_thread(sheets.push, products, "append", page_url)
     except sheets.SheetsError as exc:
         return {"ok": False, "reason": str(exc)}
     except Exception as exc:  # noqa: BLE001 - see docstring
@@ -228,6 +231,10 @@ async def _push_to_sheets(products: list[Product]) -> dict:
         "rowsUpdated": result["rowsUpdated"],
         "skipped": result["skipped"],
         "url": result["url"],
+        # Which sheets this page landed in, and any country whose sheet id is
+        # unset — an unconfigured storefront must not fail silently.
+        "sheets": result["sheets"],
+        "errors": result["errors"],
     }
 
 
@@ -270,6 +277,8 @@ async def export_to_sheets(request: SheetsExportRequest):
         raise HTTPException(status_code=404, detail="Nothing saved yet — scrape a page first.")
 
     try:
+        # No page_url: the CSV mixes storefronts, so each record routes on its
+        # own URL rather than inheriting one page's.
         return sheets.push(products, mode=request.mode)
     except sheets.SheetsError as exc:
         # 503, not 500: the code is fine, the credentials or sharing are not.

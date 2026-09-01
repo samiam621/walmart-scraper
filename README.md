@@ -143,18 +143,26 @@ needs a human at a browser.
    download somewhere outside this repo.
 4. Open the JSON and copy `client_email` — it looks like
    `something@project-id.iam.gserviceaccount.com`.
-5. Create the spreadsheet and **Share it with that address as Editor.** This is
-   the step everyone misses: a service account is its own principal and owns
-   nothing until you share with it.
-6. Copy the sheet id out of the URL — the part between `/d/` and `/edit`.
+5. Create one spreadsheet per storefront you scrape and **Share each one with
+   that address as Editor.** This is the step everyone misses: a service
+   account is its own principal and owns nothing until you share with it. The
+   one key reaches all three sheets, but the sharing is per file.
+6. Copy each sheet id out of its URL — the part between `/d/` and `/edit`.
 
-Then point the backend at both, in a `.env` at the repo root:
+Then point the backend at them, in a `.env` at the repo root:
 
 ```
 GOOGLE_SERVICE_ACCOUNT_FILE=/Users/you/.config/walmart-scraper/service-account.json
-GOOGLE_SHEET_ID=1AbC...xyz
+GOOGLE_SHEET_ID_US=1AbC...xyz
+GOOGLE_SHEET_ID_CA=1DeF...xyz
+GOOGLE_SHEET_ID_MX=1GhI...xyz
 GOOGLE_SHEET_TAB=Sheet1
 ```
+
+Rows are routed by the storefront they were scraped from: `walmart.com` to the
+US sheet, `walmart.ca` to CA, `walmart.com.mx` to MX. Set only the ones you
+use — scraping a storefront whose id is unset reports the missing variable in
+the popup and leaves the other sheets working.
 
 `app.py` loads that file at import, before anything reads `os.getenv`. Use an
 **absolute path** for the key: uvicorn resolves relative paths against the
@@ -228,7 +236,7 @@ are prompted for and never stored in git):
 
 | Variable | Value |
 |---|---|
-| `GOOGLE_SHEET_ID` | the id from your sheet URL |
+| `GOOGLE_SHEET_ID_US` / `_CA` / `_MX` | the id from each sheet's URL |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | the key, base64 encoded |
 | `GOOGLE_SHEET_TAB` | `Sheet1` |
 | `EXTENSION_IDS` | your extension's id, comma separated |

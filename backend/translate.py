@@ -4,14 +4,12 @@ Which storefront a product came from is read off the scraped URL's domain —
 the one fact a caller cannot forget to set — not a flag threaded through
 every call site.
 
-The service behind deep_translator is scraped rather than an API: it answers
-with an unparseable page often enough (measured at roughly 1 call in 12) that
-a single attempt drops titles at random. Those misses are invisible in the
-sheet, because a blank cell there looks exactly like a product that needed no
-translating. So this module retries, and it reports what it could not do
-instead of swallowing it — see annotate_all's return value, which app.py puts
-in the scrape response the same way it reports a failed Sheets push.
+The current service behind deep_translator is scraped rather than an API
 """
+#if we want to switch to google translate (paid)
+from google.cloud import translate
+#option
+
 
 from __future__ import annotations
 
@@ -24,22 +22,11 @@ from deep_translator import google as _deep_translator_google
 
 from models import Product
 
-# domain -> deep_translator source language. Only non-English storefronts need
-# an entry; walmart.com and walmart.ca (English tab) are absent on purpose so
-# their titles pass through untouched.
+# Only non-English storefronts need translation
 NON_ENGLISH_STOREFRONTS: dict[str, str] = {
     "walmart.com.mx": "es",
 }
 
-# deep_translator calls requests.get() with no timeout, so a connection that
-# stalls would hang the scrape thread indefinitely — and this runs inside a
-# request someone is waiting on. Its google module holds `requests` as a
-# module-global and only ever calls .get() on it, so replacing that one name
-# gives every call it makes a deadline without altering requests for anything
-# else in the process.
-#
-# Kept short deliberately: a healthy call answers in well under a second, so
-# a longer ceiling only ever adds delay to calls that were going to fail.
 REQUEST_TIMEOUT = 4.0
 
 
@@ -60,23 +47,10 @@ _deep_translator_google.requests = _TimeoutRequests
 MAX_ATTEMPTS = 3
 RETRY_WAITS = (0.3, 0.8)
 
-# The ceiling on the whole translation phase, and the thing that keeps a
-# translation problem from becoming a scrape problem. Retries multiply with
-# the per-page cap — 25 titles retried three times against a host that is
-# timing out is over ten minutes — and the save to the CSV and the push to
-# Sheets both happen *after* this returns. Without a wall clock on it, a
-# service being slow stops being a missing English title and starts being a
-# scrape the user never gets back. Whatever does not fit is reported as
-# skipped; the sheet's fill-only merge means scraping that product's own page
-# later drops the translation into the blank cell.
+# Wall clock on the whole phase, so a slow translator delays the save/Sheets push that follows it, not blocks it; unfit titles are reported skipped and fill in later from the product page.
 TRANSLATION_BUDGET_SECONDS = 8.0
 
-# A search page carries dozens of tiles, and every title is its own round
-# trip. Uncapped, one grid scrape would spend minutes translating and is the
-# surest way to get throttled — which would then cost the *product* pages
-# their translations too. Past this the titles are left to be filled in when
-# the product page itself is scraped, and the count is reported rather than
-# quietly dropped.
+# Per-page cap on titles translated, so one large grid can't spend minutes and get the service throttled for the product pages that follow; the rest are reported skipped, not dropped.
 MAX_TRANSLATIONS = 25
 
 
