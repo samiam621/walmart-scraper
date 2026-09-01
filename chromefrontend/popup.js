@@ -1,5 +1,5 @@
 
-const USE_LOCAL = true;
+const USE_LOCAL = false;
 
 const LOCAL_BACKEND = 'http://127.0.0.1:8000';
 const DEFAULT_BACKEND = 'https://walmart-scraper-wv29.onrender.com';
