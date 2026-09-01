@@ -16,6 +16,7 @@ import export  # noqa: E402 - must follow load_dotenv
 import listing  # noqa: E402
 import sheets  # noqa: E402
 import storage  # noqa: E402
+import translate  # noqa: E402
 from models import Product, ScrapeRequest
 from pydantic import BaseModel
 
@@ -168,14 +169,44 @@ async def scrape_page(request: ScrapeRequest, save: bool = True):
 
 
 async def _respond(products: list[Product], kind: str, save: bool) -> dict:
+    translation = await _translate_titles(products)
+
     if save:
         for product in products:
             storage.save_product(product)
 
     payload = {"pageType": kind, "count": len(products), "products": products}
+    if translation:
+        payload["translation"] = translation
     if save and AUTO_EXPORT_SHEETS:
         payload["export"] = await _push_to_sheets(products)
     return payload
+
+
+async def _translate_titles(products: list[Product]) -> dict | None:
+    """Best-effort title translation for non-English storefronts (e.g.
+    walmart.com.mx). Mirrors _push_to_sheets: a translation failure must
+    never fail the scrape, but it must not be silent either — an untranslated
+    title reaches the sheet as a blank cell, which is indistinguishable from
+    a product that never needed translating. None when this page had nothing
+    to translate, so an ordinary walmart.com scrape says nothing about it.
+    """
+    try:
+        # deep_translator is blocking, and this runs inside an async
+        # endpoint; without the thread it would stall every other request.
+        report = await asyncio.to_thread(translate.annotate_all, products)
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        return {
+            "ok": False,
+            "translated": 0,
+            "failed": 0,
+            "skipped": 0,
+            "reason": f"Translation failed: {exc}",
+        }
+
+    if not (report["translated"] or report["failed"] or report["skipped"]):
+        return None
+    return report
 
 
 async def _push_to_sheets(products: list[Product]) -> dict:

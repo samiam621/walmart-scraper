@@ -1,5 +1,5 @@
 
-const USE_LOCAL = false;
+const USE_LOCAL = true;
 
 const LOCAL_BACKEND = 'http://127.0.0.1:8000';
 const DEFAULT_BACKEND = 'https://walmart-scraper-wv29.onrender.com';
@@ -88,18 +88,32 @@ async function activeTabHtml() {
   return result;
 }
 
+// Generous rather than snappy: a free host parks an idle instance and takes
+// most of a minute to wake up, and failing a scrape that was merely waiting
+// on a cold start would be worse than the wait. This is here so the popup
+// cannot sit disabled forever, not to enforce a latency target.
+const REQUEST_TIMEOUT_MS = 90_000;
+
 async function post(payload, path = '/api/scrape-page') {
   let response;
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS);
   try {
     response = await fetch(`${BACKEND}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      signal: abort.signal,
     });
-  } catch {
+  } catch (error) {
     // fetch only rejects on a transport failure, which here means the server
     // is not running — a distinct problem from a page that failed to parse.
+    if (error.name === 'AbortError') {
+      throw new Error(`No answer from ${BACKEND} after ${REQUEST_TIMEOUT_MS / 1000}s. It may still be starting up — try again.`);
+    }
     throw new Error(`Backend not reachable at ${BACKEND}. Is uvicorn running?`);
+  } finally {
+    clearTimeout(timer);
   }
 
   const body = await response.json().catch(() => null);
@@ -121,7 +135,7 @@ async function scrapeActiveTab() {
     const payload = await activeTabHtml();
     status.textContent = `Parsing ${new URL(payload.url).hostname}…`;
 
-    const { pageType, count, products, export: exported } = await post(payload);
+    const { pageType, count, products, export: exported, translation } = await post(payload);
 
     if (pageType === 'listing') {
       const refurbished = products.filter((p) => p.condition === 'refurbished').length;
@@ -134,7 +148,7 @@ async function scrapeActiveTab() {
     }
 
     // The backend pushes to Sheets on the way through when AUTO_EXPORT_SHEETS
-    // is on. Report it, and say so loudly when it failed: on a host with no
+    // is on. Report loudly when it failed: on a host with no
     // persistent disk the sheet is the only durable copy, so a silent failure
     // here is a scrape you are about to lose.
     if (exported) {
@@ -144,6 +158,18 @@ async function scrapeActiveTab() {
           : ' · not sent to Sheets',
       ));
       if (!exported.ok) summary.append(row('Sheets', exported.reason));
+    }
+
+    // Only present when the page had Spanish titles to translate. A miss
+    // reaches the sheet as an empty cell, which reads as "nothing to
+    // translate" rather than "this failed" — so say which one it was.
+    if (translation && (!translation.ok || translation.skipped)) {
+      summary.append(row(
+        'Translation',
+        `${translation.failed} failed`
+          + (translation.skipped ? `, ${translation.skipped} skipped` : '')
+          + (translation.reason ? ` — ${translation.reason}` : ''),
+      ));
     }
 
     // Rows without an id cannot be addressed by the export endpoint, so they

@@ -28,6 +28,8 @@ class Product(BaseModel):
     description: str | None = None
     rating: float | None = None
     reviewCount: int | None = None
+    # English translation product title
+    titleEn: str | None = None
 
     # Where each field came from, for debugging a bad scrape.
     sources: dict[str, str] = Field(default_factory=dict)

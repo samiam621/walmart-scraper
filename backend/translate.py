@@ -37,7 +37,10 @@ NON_ENGLISH_STOREFRONTS: dict[str, str] = {
 # module-global and only ever calls .get() on it, so replacing that one name
 # gives every call it makes a deadline without altering requests for anything
 # else in the process.
-REQUEST_TIMEOUT = 8.0
+#
+# Kept short deliberately: a healthy call answers in well under a second, so
+# a longer ceiling only ever adds delay to calls that were going to fail.
+REQUEST_TIMEOUT = 4.0
 
 
 class _TimeoutRequests:
@@ -55,7 +58,18 @@ _deep_translator_google.requests = _TimeoutRequests
 # on this, and the failure being retried is a bad response rather than a busy
 # server, so it usually clears immediately.
 MAX_ATTEMPTS = 3
-RETRY_WAITS = (0.4, 1.2)
+RETRY_WAITS = (0.3, 0.8)
+
+# The ceiling on the whole translation phase, and the thing that keeps a
+# translation problem from becoming a scrape problem. Retries multiply with
+# the per-page cap — 25 titles retried three times against a host that is
+# timing out is over ten minutes — and the save to the CSV and the push to
+# Sheets both happen *after* this returns. Without a wall clock on it, a
+# service being slow stops being a missing English title and starts being a
+# scrape the user never gets back. Whatever does not fit is reported as
+# skipped; the sheet's fill-only merge means scraping that product's own page
+# later drops the translation into the blank cell.
+TRANSLATION_BUDGET_SECONDS = 8.0
 
 # A search page carries dozens of tiles, and every title is its own round
 # trip. Uncapped, one grid scrape would spend minutes translating and is the
@@ -78,16 +92,23 @@ def _source_language(url: str | None) -> str | None:
     return None
 
 
-def _translate_one(translator: GoogleTranslator, text: str) -> tuple[str | None, str | None]:
+def _translate_one(translator: GoogleTranslator, text: str,
+                   deadline: float) -> tuple[str | None, str | None]:
     """(translation, error). Retries a failure; gives up quietly after that.
 
     Both failure modes are treated alike: deep_translator raises when it
     cannot find a translation in the response, but it also has a path that
     returns None outright, and a caller that only caught the exception would
     still write a blank.
+
+    `deadline` is a time.monotonic() value the retries stay inside — no new
+    attempt is started past it, and a backoff never sleeps beyond it, so the
+    slowest possible title is one attempt rather than the full three.
     """
     error = None
     for attempt in range(MAX_ATTEMPTS):
+        if time.monotonic() >= deadline:
+            return None, error or "translation budget exhausted"
         try:
             result = translator.translate(text)
             if result:
@@ -96,7 +117,7 @@ def _translate_one(translator: GoogleTranslator, text: str) -> tuple[str | None,
         except Exception as exc:  # noqa: BLE001 - reported, not raised; see module docstring
             error = f"{type(exc).__name__}: {exc}".strip()
         if attempt < len(RETRY_WAITS):
-            time.sleep(RETRY_WAITS[attempt])
+            time.sleep(max(0.0, min(RETRY_WAITS[attempt], deadline - time.monotonic())))
     return None, error
 
 
@@ -107,6 +128,7 @@ def annotate_all(products: list[Product]) -> dict:
     not do comes back in the report instead, so a blank cell in the sheet can
     be told apart from a product that needed no translating.
     """
+    deadline = time.monotonic() + TRANSLATION_BUDGET_SECONDS
     translators: dict[str, GoogleTranslator] = {}
     # Grids repeat the same title across sponsored and organic slots, and a
     # repeat costs a whole round trip. Keyed by language too, since the same
@@ -114,6 +136,7 @@ def annotate_all(products: list[Product]) -> dict:
     done: dict[tuple[str, str], str] = {}
     translated = failed = skipped = calls = 0
     reason: str | None = None
+    out_of_time = False
 
     for product in products:
         if product.titleEn or not product.title:
@@ -128,9 +151,12 @@ def annotate_all(products: list[Product]) -> dict:
             translated += 1
             continue
 
-        # Counted against the calls actually made, so a page of duplicates
-        # is not charged for translations it never asked for.
-        if calls >= MAX_TRANSLATIONS:
+        # Both bounds checked before the call, never during: a title is
+        # either attempted within the budget or left for another scrape.
+        # Calls are counted rather than products, so a page of duplicates is
+        # not charged for translations it never had to make.
+        if calls >= MAX_TRANSLATIONS or time.monotonic() >= deadline:
+            out_of_time = out_of_time or time.monotonic() >= deadline
             skipped += 1
             continue
 
@@ -138,7 +164,7 @@ def annotate_all(products: list[Product]) -> dict:
         translator = translators.setdefault(
             language, GoogleTranslator(source=language, target="en")
         )
-        result, error = _translate_one(translator, product.title)
+        result, error = _translate_one(translator, product.title, deadline)
         if result:
             product.titleEn = result
             done[(language, product.title)] = result
@@ -149,9 +175,10 @@ def annotate_all(products: list[Product]) -> dict:
 
     if skipped and reason is None:
         reason = (
-            f"capped at {MAX_TRANSLATIONS} titles for one page; scrape the "
-            f"product pages to fill in the rest"
-        )
+            f"stopped after {TRANSLATION_BUDGET_SECONDS:g}s"
+            if out_of_time
+            else f"capped at {MAX_TRANSLATIONS} titles for one page"
+        ) + "; scrape the product pages to fill in the rest"
 
     return {
         "ok": failed == 0,

@@ -50,13 +50,15 @@ BROWSER_HEADERS = {
 # "certified refurbished" must be checked before bare "used". The groups are
 # non-capturing because CONDITION_DETAIL below is assembled out of them.
 CONDITION_PATTERNS = [
-    # "Restored" is Walmart's own word for refurbished, and the one its
-    # listings actually use.
+    # "Restored" is same as refurbished
+    # l"Reacondicionado"/"restaurado" are the same word
+    # on walmart.com.mx.
     ("refurbished",
-     r"\b(?:restored|refurb(?:ished)?|renewed|reconditioned|certified\s+pre[\s-]?owned)\b"),
-    ("open_box", r"\b(?:open[\s-]?box|opened[\s-]?box)\b"),
-    ("used", r"\b(?:used|pre[\s-]?owned|second[\s-]?hand)\b"),
-    ("new", r"\b(?:brand[\s-]?new|new)\b"),
+     r"\b(?:restored|refurb(?:ished)?|renewed|reconditioned|certified\s+pre[\s-]?owned|"
+     r"reacondicionad[oa]|restaurad[oa])\b"),
+    ("open_box", r"\b(?:open[\s-]?box|opened[\s-]?box|caja\s+abiert[ao])\b"),
+    ("used", r"\b(?:used|pre[\s-]?owned|second[\s-]?hand|usad[oa]|de\s+segunda\s+mano)\b"),
+    ("new", r"\b(?:brand[\s-]?new|new|nuevo|nueva)\b"),
 ]
 
 # Walmart's display wording for each bucket, and the only copy of it: these
@@ -70,7 +72,24 @@ CONDITION_LABELS = {
 }
 
 
-CONDITION_GRADES = r"premium|like[\s-]?new|very\s+good|excellent|good|fair|acceptable"
+# Spanish grade wording and its English equivalent in _grade() 
+# the sheet's grade text stays English 
+GRADE_TRANSLATIONS = {
+    "como nuevo": "like new",
+    "como nueva": "like new",
+    "excelente": "excellent",
+    "muy bueno": "very good",
+    "muy buena": "very good",
+    "bueno": "good",
+    "buena": "good",
+    "regular": "fair",
+    "aceptable": "acceptable",
+}
+
+CONDITION_GRADES = (
+    r"premium|like[\s-]?new|very\s+good|excellent|good|fair|acceptable|"
+    r"como\s+nuev[oa]|excelente|muy\s+buen[ao]|buen[ao]|regular|aceptable"
+)
 
 # The family half of the condition regexes below, built from CONDITION_PATTERNS
 # so the two cannot drift apart. "new" is left out: a new item has no grade.
@@ -88,11 +107,8 @@ CONDITION_DETAIL = re.compile(
     re.I,
 )
 
-# Same pair, but tolerating a little filler between them ("Certified
-# Refurbished | Grade A Like New"). The gap is capped and refuses to span
-# another family word so it can only ever join one family word to its nearest
-# grade -- an unbounded .* would cheerfully bridge two unrelated condition
-# mentions at opposite ends of a long title.
+# Same pair, but tolerating a little filler between them ex ("Certified
+# Refurbished | Grade A Like New"). 
 CONDITION_DETAIL_LOOSE = re.compile(
     r"(?P<family>{family})(?:(?!{family}).){{0,25}}?\b(?P<grade>{grades})\b".format(
         family=_CONDITION_FAMILY_PATTERN,
@@ -200,8 +216,9 @@ def reconcile_condition(condition: str | None, *texts: str | None) -> str | None
 
 
 def _grade(text: str) -> str:
-    """"like  new" -> "Like New"."""
-    return re.sub(r"[\s-]+", " ", text).strip().title()
+    """"like  new" -> "Like New"; "como nuevo" -> "Like New"."""
+    normalized = re.sub(r"[\s-]+", " ", text).strip().lower()
+    return GRADE_TRANSLATIONS.get(normalized, normalized).title()
 
 
 def detect_condition_detail(*texts: str | None,
@@ -953,6 +970,11 @@ def from_url_shape(soup: BeautifulSoup, product: Product, url: str | None) -> No
 # breaks, which is why they are last: treat a scrape that depends on them as a
 # warning that the layer above it has stopped working.
 
+# Storefronts this layer is allowed to read markup from — the same domains
+# export.py's _WALMART_STOREFRONTS reconstructs links for. A plain
+# .endswith("walmart.com") would silently miss walmart.ca and walmart.com.mx.
+WALMART_HOSTS = ("walmart.com", "walmart.ca", "walmart.com.mx")
+
 SELECTORS: dict[str, list[str]] = {
     "price": ['[itemprop="price"]', '[data-seo-id="hero-price"]',
               '[data-testid="price-wrap"] span'],
@@ -991,8 +1013,10 @@ def from_selectors(soup: BeautifulSoup, product: Product, url: str | None) -> No
     # A URL is not required — the extension can hand over HTML alone — but when
     # there is one, refuse to read Walmart's markup out of some other site's
     # page and label it as Walmart data.
-    if url and not urlparse(url).netloc.lower().endswith("walmart.com"):
-        return
+    if url:
+        netloc = urlparse(url).netloc.lower()
+        if not any(netloc == host or netloc.endswith("." + host) for host in WALMART_HOSTS):
+            return
     for field, selectors in SELECTORS.items():
         for selector in selectors:
             tag = soup.select_one(selector)

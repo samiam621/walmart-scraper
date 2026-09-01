@@ -30,6 +30,7 @@ COLUMNS = [
     "GTIN",
     "Other Identifier",
     "Listing URL",
+    "English Title",
 ]
 
 # Item ids are not all numbers. walmart.com uses a numeric id; walmart.ca uses
@@ -148,6 +149,7 @@ def resolve_item_id(record) -> str | None:
 _WALMART_STOREFRONTS = {
     "walmart.ca": ("https://www.walmart.ca", "/en/ip"),
     "walmart.com": ("https://www.walmart.com", "/ip"),
+    "walmart.com.mx": ("https://www.walmart.com.mx", "/ip"),
 }
 
 _LOCALE_IN_PATH = re.compile(r"\A/(en|fr)(?:/|\Z)")
@@ -224,7 +226,13 @@ def other_identifier(record, gtin: str | None) -> str | None:
 def _sheet_item_id(item_id: str | None) -> int | str:
     if not item_id:
         return ""
-    return int(item_id) if item_id.isdigit() else item_id
+    # Cast to a number only when there is no leading zero to lose — true of
+    # every walmart.com id observed (e.g. "20539670270"). walmart.com.mx ids
+    # can be 14-digit, zero-padded GTIN-style values ("00085369895438"); a
+    # bare int() cast there silently drops the leading zeros.
+    if item_id.isdigit() and not item_id.startswith("0"):
+        return int(item_id)
+    return item_id
 
 
 def product_to_row(record) -> list:
@@ -243,6 +251,7 @@ def product_to_row(record) -> list:
         gtin or "",
         other_identifier(record, gtin) or "",
         canonical_listing_url(record) or "",
+        _get(record, "titleEn") or "",
     ]
 
 
