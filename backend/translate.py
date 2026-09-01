@@ -74,8 +74,7 @@ def _translate_batch(client: translate.Client, texts: list[str],
     """(translations, error) for a whole list of titles in one call.
 
     All-or-nothing per call: a retry re-sends the entire list, so a failure
-    that outlives MAX_ATTEMPTS fails every title in it together. See
-    annotate_all for why that trade is worth making.
+    that outlives MAX_ATTEMPTS fails every title in it together
 
     `deadline` is a time.monotonic() value the retries stay inside — no new
     attempt is started past it, and a backoff never sleeps beyond it.

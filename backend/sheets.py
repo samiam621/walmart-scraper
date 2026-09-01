@@ -1,30 +1,6 @@
 """Pushes export rows into a Google Sheet, one spreadsheet per storefront.
 
-Auth is a service account rather than OAuth: the backend runs headless next to
-uvicorn, and an OAuth flow needs a human at a browser to refresh consent. The
-cost is one manual step — every sheet has to be shared with the service
-account's own email address, because a service account is a separate principal
-that owns nothing by default. That is the step people miss, so it is what the
-error messages here point at. One key reaches all three sheets, but the sharing
-is per file.
-
-Rows are routed by the storefront they were scraped from, so a .ca item never
-lands in the US sheet. A single push can span all three: the CSV re-export path
-mixes storefronts in one call, so every record is routed on its own URL rather
-than on the request's.
-
-Configuration, all environment variables. Supply the key either way — the
-inline form wins if both are set:
-
-  GOOGLE_SERVICE_ACCOUNT_JSON   the key's JSON contents, or that JSON base64
-                                encoded. For hosts like Render where there is
-                                no filesystem to put a file on.
-  GOOGLE_SERVICE_ACCOUNT_FILE   path to the key file. For local runs, and for
-                                Render Secret Files (/etc/secrets/<name>).
-  GOOGLE_SHEET_ID_US            the id from each sheet URL, /d/<this>/edit.
-  GOOGLE_SHEET_ID_CA            Set only the storefronts you scrape; an unset
-  GOOGLE_SHEET_ID_MX            one is reported, not fatal.
-  GOOGLE_SHEET_TAB              worksheet name, defaults to Sheet1
+Rows are routed by the storefront they were scraped from
 """
 
 import os
@@ -125,9 +101,7 @@ def _open_worksheet(client, sheet_id: str, tab: str, key: dict):
         status = getattr(exc.response, "status_code", None)
         if status in (403, 404):
             raise SheetsError(
-                f"Cannot open sheet {sheet_id}. Share it (Editor) with "
-                f"{key.get('client_email', 'the service account')}, and check "
-                f"the id is the part of the URL between /d/ and /edit."
+                "Cannot open sheet. Share it with gmail and make sure sheet id is correct"
             ) from exc
         raise SheetsError(f"Google Sheets API error: {exc}") from exc
 
